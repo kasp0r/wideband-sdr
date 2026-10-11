@@ -102,6 +102,21 @@ the visible spectrum span would be correspondingly narrower.
 
 ## Quick start
 
+### Automated setup (recommended)
+
+Two helper scripts make the manual steps below much easier:
+
+```bash
+./scripts/setup.sh      # interactive wizard: Docker + Ollama + .env + model + start
+./scripts/check.sh      # diagnose connectivity (Docker, rtl_tcp, Ollama, app)
+```
+
+`setup.sh` checks for Docker and Ollama (offering to install them), prompts for your
+SDR host/port and Ollama URL/model, writes `.env`, pulls the model, and starts the app
+with `docker compose up`. Run `check.sh` any time something isn't working — it reports
+what's reachable and what isn't. (Both are bash scripts, for Linux/macOS/WSL.) See
+[`scripts/README.md`](scripts/README.md) for the details.
+
 ### 1. Prerequisites
 
 - The rtl_tcp server running (see below).
