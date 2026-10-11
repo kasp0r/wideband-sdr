@@ -48,8 +48,6 @@ The backend is the **single** client to `rtl_tcp` (rtl_tcp only accepts one clie
 time). It owns the radio, does the DSP, and multiplexes results out to any number of
 browsers.
 
-![Wideband-SDR](resources/screenshot.png)
-
 ## Contents
 
 - [Features](#features)
