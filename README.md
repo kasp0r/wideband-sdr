@@ -102,6 +102,11 @@ the visible spectrum span would be correspondingly narrower.
 
 ## Quick start
 
+> **Want an automated setup?** Run `./scripts/setup.sh` for an interactive
+> wizard that checks/installs Docker and Ollama, writes your `.env`, pulls the
+> model, and starts the app. Use `./scripts/check.sh` any time to diagnose
+> connectivity.
+
 ### 1. Prerequisites
 
 - The rtl_tcp server running (see below).
