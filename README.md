@@ -18,7 +18,9 @@ browser. Plug in a dongle, point the app at it, and you get:
 No specialised radio hardware beyond the dongle is needed, and the whole thing runs in a
 single Docker container.
 
-[![Watch the demo — Wideband-SDR Basic Usage](https://img.youtube.com/vi/KPKK8WPAOEA/maxresdefault.jpg)](https://youtu.be/KPKK8WPAOEA)
+[![Watch the Wideband-SDR demo video](https://img.youtube.com/vi/KPKK8WPAOEA/maxresdefault.jpg)](https://youtu.be/KPKK8WPAOEA)
+
+*▶️ Watch the demo video — Wideband-SDR Basic Usage*
 
 ### New to SDR?
 
