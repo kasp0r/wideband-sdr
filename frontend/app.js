@@ -4,6 +4,7 @@
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status");
 const connectBtn = $("connectBtn");
+const resetBtn = $("resetBtn");
 const hostInput = $("host");
 const portInput = $("port");
 const hostHistory = $("hostHistory");
@@ -287,6 +288,28 @@ function renderSpectrum() {
   }
 
   drawTuneOverlay(sctx, w, h, true);
+
+  // Squelch level marker: a dashed line at (noise floor + squelch) dB, so you can
+  // see where the squelch threshold sits relative to the trace.
+  if (squelch > 0 && lastMetrics && lastMetrics.noise_floor_db != null) {
+    const sqDb = lastMetrics.noise_floor_db + squelch;
+    if (sqDb >= minDb && sqDb <= maxDb) {
+      const y = h - ((sqDb - minDb) / (maxDb - minDb)) * (h * 0.92) - h * 0.04;
+      sctx.save();
+      sctx.strokeStyle = "rgba(255, 200, 60, 0.9)";
+      sctx.setLineDash([6, 4]);
+      sctx.lineWidth = 1;
+      sctx.beginPath();
+      sctx.moveTo(0, y);
+      sctx.lineTo(w, y);
+      sctx.stroke();
+      sctx.restore();
+      sctx.fillStyle = "rgba(255, 200, 60, 0.95)";
+      sctx.font = "10px monospace";
+      sctx.textAlign = "right";
+      sctx.fillText("SQL", w - 4, y - 3);
+    }
+  }
 }
 
 function ensureWfBuffer(w, h) {
@@ -702,6 +725,16 @@ connectBtn.addEventListener("click", async () => {
     }
   }
   refreshStatus();
+});
+
+resetBtn.addEventListener("click", () => {
+  if (!confirm("Reset all saved settings (theme, favourites, chat, connection) and reload?")) return;
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith("sdr-")) localStorage.removeItem(k);
+    }
+  } catch (e) { /* ignore */ }
+  location.reload();
 });
 
 gainSelect.addEventListener("change", () => {
@@ -1281,6 +1314,7 @@ squelchSlider.addEventListener("input", () => {
   squelch = Number(squelchSlider.value);
   squelchValue.textContent = squelch > 0 ? squelch + " dB" : "off";
   sendRadioConfig();
+  renderSpectrum(); // update the squelch marker on the trace
   persistSettings();
 });
 
