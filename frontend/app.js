@@ -728,10 +728,11 @@ connectBtn.addEventListener("click", async () => {
 });
 
 resetBtn.addEventListener("click", () => {
-  if (!confirm("Reset all saved settings (theme, favourites, chat, connection) and reload?")) return;
+  if (!confirm("Reset all saved settings (theme, chat, connection) and reload? Favourites are kept.")) return;
   try {
     for (const k of Object.keys(localStorage)) {
-      if (k.startsWith("sdr-")) localStorage.removeItem(k);
+      // Keep favourites across a reset.
+      if (k.startsWith("sdr-") && k !== "sdr-favorites") localStorage.removeItem(k);
     }
   } catch (e) { /* ignore */ }
   location.reload();
