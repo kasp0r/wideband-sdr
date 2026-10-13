@@ -67,26 +67,34 @@ browsers.
 
 - **Live spectrum + waterfall** with a frequency axis, peak labels, click-to-tune, a
   centre/tuned-frequency line, and a passband overlay showing the demod filter width.
-  **Zoom** into any region with the mouse wheel or the zoom slider (double-click to
-  reset; smallest zoom set by `MIN_SPAN_HZ`), **smooth** the trace, and choose a
-  **colormap** (turbo/viridis/inferno/plasma/grayscale/green) from the waterfall bar. The
-  noise floor can be set manually or **auto-ranged** to the signal.
-- **Themes** — pick Black, Dark, Midnight, Amber, Light, Solarized, Nord, or Terminal
-  (phosphor-green) from the top-right selector; your choice is remembered.
-- **Audio demodulation** — AM / NBFM / WFM / USB / LSB, with a bandwidth control, volume,
-  FM de-emphasis (50/75 µs), a tone tilt EQ, SSB **pitch** (BFO) fine-tune, a soft
-  limiter to reduce clipping, and **noise tools**: a **squelch** (mutes below an SNR
-  threshold) and a **noise-reduction** low-pass to cut hiss.
-- **Keyboard shortcuts** — arrow keys nudge the frequency (Shift = coarser), `+`/`-`
-  zoom, space pauses the waterfall, and `L` / `R` toggle listen/record.
+  **Zoom** into any region (mouse wheel or slider; double-click to reset, smallest span
+  set by `MIN_SPAN_HZ`), **smooth** the trace, choose a **colormap**
+  (turbo/viridis/inferno/plasma/grayscale/green), and set the noise floor manually or
+  **auto-range** it to the signal.
+- **Audio demodulation** — AM / NBFM / WFM / USB / LSB with a bandwidth control, volume,
+  FM de-emphasis (50/75 µs), a tone tilt EQ, SSB **pitch** (BFO) fine-tune, and a soft
+  limiter to reduce clipping.
+- **Noise tools** — a **squelch** (mutes audio below an SNR threshold, with a marker drawn
+  on the spectrum) and a **noise-reduction** low-pass to cut hiss.
+- **Reception aids** — ★ **favourites** (saved frequencies with demod mode + bandwidth)
+  and **audio recording** to WAV with embedded metadata.
 - **AI assistant** (Ollama tool-calling) that can *control* the radio and *reason* about
-  the spectrum:
+  the spectrum, with replies rendered as Markdown:
   - `get_status` / `get_spectrum` / `get_signal_metrics` — inspect state and signal quality,
   - `tune` / `fine_tune` — move or nudge the receiver,
   - `scan` — sweep a band and report detected signals,
   - `characterize` — estimate bandwidth and likely modulation,
-  - `set_demod_mode` / `set_bandwidth` / `set_sample_rate` / `set_gain` — full control,
+  - `set_demod_mode` / `set_bandwidth` / `set_sample_rate` / `set_gain` / `set_squelch` /
+    `set_noise_reduction` / `set_pitch` — full control,
   - and an "optimise the signal" flow that measures, corrects, re-measures, and reports.
+  The **Ollama host and model** are configurable from the UI (connect, status, model
+  auto-select, persisted).
+- **Customisable UI** — 8 **themes** (Black, Dark, Midnight, Amber, Light, Solarized,
+  Nord, Terminal), **draggable/reorderable** right-hand panels with collapsible drawers,
+  and a **Help** dialog (usage + shortcuts). Settings persist; **↺ Reset** clears them
+  while keeping favourites.
+- **Keyboard shortcuts** — arrow keys nudge the frequency (Shift = coarser), `+` / `-`
+  zoom, space pauses the waterfall, and `L` / `R` toggle listen/record.
 
 ## Supported hardware
 

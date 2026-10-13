@@ -11,3 +11,6 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+# Local agent/assistant instructions (not part of the project)
+AGENT.md
