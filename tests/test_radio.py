@@ -19,6 +19,25 @@ def _fake_radio(sample_rate=2_400_000, center_freq=100_000_000):
     return r
 
 
+def test_stale_reader_loop_exits_immediately():
+    # A reader loop whose run id no longer matches must bail out without touching the
+    # SDR. Otherwise a stale thread revived by connect() would double-process audio.
+    r = Radio()
+    r.running = True
+    r._run_id = 5
+    r.sdr = object()
+    t0 = time.time()
+    r._reader_loop(0)
+    assert time.time() - t0 < 1.0
+
+
+def test_disconnect_bumps_run_id():
+    r = Radio()
+    before = r._run_id
+    r.disconnect()
+    assert r._run_id > before
+
+
 def test_scan_rejects_negative_step():
     r = _fake_radio()
     res = r.scan(100_000_000, 100_010_000, step_hz=-1000)

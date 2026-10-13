@@ -20,6 +20,7 @@ class Radio:
         self.lock = threading.Lock()
         self.running = False
         self._thread = None
+        self._run_id = 0
         self.connected = False
 
         self.center_freq = config.DEFAULT_FREQ
@@ -62,7 +63,9 @@ class Radio:
         self._open_connection()
         self._reconnect_attempts = 0
         self.running = True
-        self._thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._run_id += 1
+        run_id = self._run_id
+        self._thread = threading.Thread(target=self._reader_loop, args=(run_id,), daemon=True)
         self._thread.start()
 
     def _open_connection(self):
@@ -77,6 +80,7 @@ class Radio:
 
     def disconnect(self):
         self.running = False
+        self._run_id += 1  # invalidate any in-flight reader loop so it exits
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
@@ -254,15 +258,15 @@ class Radio:
         }
 
     # ---- spectrum reader ----
-    def _reader_loop(self):
+    def _reader_loop(self, run_id):
         n = config.FFT_SIZE * config.AVERAGES
-        while self.running:
+        while self.running and self._run_id == run_id:
             # Reconnect (with exponential backoff) if there is no connection.
-            while self.running and self.sdr is None:
+            while self.running and self._run_id == run_id and self.sdr is None:
                 delay = min(config.RECONNECT_DELAY * (2 ** self._reconnect_attempts),
                             config.RECONNECT_MAX_DELAY)
                 self._reconnect_attempts += 1
-                if not self._wait(delay):
+                if not self._wait(delay) or self._run_id != run_id:
                     return
                 try:
                     self._open_connection()
@@ -270,7 +274,7 @@ class Radio:
                 except Exception as e:
                     log.warning("connect attempt failed: %s", e)
 
-            if not self.running:
+            if not self.running or self._run_id != run_id:
                 return
 
             try:
@@ -306,9 +310,13 @@ class Radio:
                 if self.audio_enabled:
                     self._process_audio(iq)
             except (RtlTcpError, OSError) as e:
+                if self._run_id != run_id:
+                    return  # superseded by a newer connect()/disconnect()
                 # Connection dropped: mark disconnected and reconnect.
                 self._on_disconnect(e)
             except Exception as e:
+                if self._run_id != run_id:
+                    return
                 log.warning("transient reader error: %s", e)
                 time.sleep(0.05)
 
