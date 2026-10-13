@@ -51,13 +51,14 @@ def _deemphasize(x, fs, tau):
 
 
 class Demodulator:
-    def __init__(self, sample_rate, mode="wfm", bandwidth=None, deemphasis_tau=75e-6, tone=0.0, bfo=0.0):
+    def __init__(self, sample_rate, mode="wfm", bandwidth=None, deemphasis_tau=75e-6, tone=0.0, bfo=0.0, nr_cutoff=0.0):
         self.sample_rate = int(sample_rate)
         self.mode = mode
         self.bandwidth = int(bandwidth) if bandwidth else DEFAULT_BANDWIDTH.get(mode, 16_000)
         self.deemphasis_tau = deemphasis_tau
         self.tone = float(tone)
         self.bfo = float(bfo)  # SSB beat-frequency offset (Hz): shifts the audio pitch
+        self.nr_cutoff = float(nr_cutoff)  # audio low-pass cutoff (Hz): 0 = off
         self.audio_rate = AUDIO_RATE
         self._sample_pos = 0  # cumulative samples, keeps the NCO phase continuous
         self._peak = None     # smoothed audio peak for AGC
@@ -73,6 +74,9 @@ class Demodulator:
 
     def set_bfo(self, bfo):
         self.bfo = float(bfo)
+
+    def set_nr(self, cutoff):
+        self.nr_cutoff = float(cutoff)
 
     def _audio_cutoff(self):
         b = self.bandwidth
@@ -117,6 +121,9 @@ class Demodulator:
             audio = np.zeros(0, dtype=np.float64)
 
         audio = self._tone(audio)
+        # Noise reduction: an extra audio low-pass to roll off high-frequency hiss.
+        if self.nr_cutoff > 0:
+            audio = _lowpass(audio, self.audio_rate, self.nr_cutoff)
         return self._normalize(audio).astype(np.float32)
 
     # ---- demod primitives ----

@@ -197,6 +197,8 @@ button:hover { background: var(--card-hover); border-color: var(--muted); }
 #bfoValue { min-width: 50px; color: var(--text); font-variant-numeric: tabular-nums; }
 #pitchControl { display: contents; }
 #pitchControl.hidden { display: none; }
+#squelchSlider, #nrSlider { width: 80px; vertical-align: middle; }
+#squelchValue, #nrValue { min-width: 44px; color: var(--text); font-variant-numeric: tabular-nums; }
 .hz { color: var(--muted); }
 
 main {

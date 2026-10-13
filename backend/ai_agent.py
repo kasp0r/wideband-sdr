@@ -197,6 +197,30 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_squelch",
+            "description": "Set the squelch threshold in dB (0 = off): mutes audio below this SNR.",
+            "parameters": {
+                "type": "object",
+                "properties": {"threshold_db": {"type": "number", "description": "SNR threshold in dB, 0 = off"}},
+                "required": ["threshold_db"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_noise_reduction",
+            "description": "Set the audio noise-reduction low-pass cutoff in Hz (0 = off), to cut high-frequency hiss.",
+            "parameters": {
+                "type": "object",
+                "properties": {"cutoff_hz": {"type": "number", "description": "Cutoff in Hz, 0 = off"}},
+                "required": ["cutoff_hz"],
+            },
+        },
+    },
 ]
 
 
@@ -212,9 +236,11 @@ def _build_context(radio):
             de = {75e-6: "75 µs", 50e-6: "50 µs", 0.0: "off"}.get(
                 radio.audio_deemphasis, f"{radio.audio_deemphasis * 1e6:.0f} µs")
             extra = f", pitch {radio.audio_bfo:+.0f} Hz" if radio.audio_mode in ("usb", "lsb") else ""
+            sq = "off" if radio.audio_squelch <= 0 else f"{radio.audio_squelch:.0f} dB"
+            nr = "off" if radio.audio_nr <= 0 else f"{radio.audio_nr:.0f} Hz"
             lines.append(
                 f"Demod {radio.audio_mode.upper()}, IF bandwidth {radio.effective_bandwidth()} Hz, "
-                f"de-emphasis {de}, tone {radio.audio_tone:+.2f}{extra}"
+                f"de-emphasis {de}, tone {radio.audio_tone:+.2f}{extra}, squelch {sq}, NR {nr}"
             )
     except Exception:
         pass
@@ -321,6 +347,12 @@ def _execute_tool(name, args, radio):
         if name == "set_pitch":
             radio.set_audio_bfo(float(args["bfo_hz"]))
             return {"ok": True, "bfo_hz": radio.audio_bfo}
+        if name == "set_squelch":
+            radio.set_audio_squelch(float(args["threshold_db"]))
+            return {"ok": True, "squelch_db": radio.audio_squelch}
+        if name == "set_noise_reduction":
+            radio.set_audio_nr(float(args["cutoff_hz"]))
+            return {"ok": True, "nr_cutoff_hz": radio.audio_nr}
         return {"error": f"unknown tool: {name}"}
     except Exception as e:  # noqa: BLE001
         return {"error": f"tool {name} failed: {e}"}

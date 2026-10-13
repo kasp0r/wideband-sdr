@@ -60,6 +60,10 @@ const toneValue = $("toneValue");
 const bfoSlider = $("bfoSlider");
 const bfoValue = $("bfoValue");
 const pitchControl = $("pitchControl");
+const squelchSlider = $("squelchSlider");
+const squelchValue = $("squelchValue");
+const nrSlider = $("nrSlider");
+const nrValue = $("nrValue");
 const volSlider = $("volSlider");
 const volValue = $("volValue");
 
@@ -983,6 +987,8 @@ let bwDragging = false;
 let deemphasis = "75us";
 let tone = 0; // -1..1 tilt EQ (tone control)
 let bfo = 0; // Hz: SSB beat-frequency offset (audio pitch)
+let squelch = 0; // dB: mute audio below this SNR (0 = off)
+let nr = 0; // Hz: noise-reduction low-pass cutoff (0 = off)
 let volume = 0.3; // 30% default, to avoid blasting ears on first listen
 let lastConfigSent = 0;
 let recording = false;
@@ -1049,7 +1055,7 @@ function stopListening() {
 function sendRadioConfig() {
   lastConfigSent = Date.now();
   if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: "config", mode: demodMode, bandwidth: audioBandwidth, deemphasis, tone, bfo }));
+    ws.send(JSON.stringify({ type: "config", mode: demodMode, bandwidth: audioBandwidth, deemphasis, tone, bfo, squelch, nr }));
   }
 }
 
@@ -1267,6 +1273,20 @@ toneSlider.addEventListener("input", () => {
 bfoSlider.addEventListener("input", () => {
   bfo = Number(bfoSlider.value);
   bfoValue.textContent = (bfo > 0 ? "+" : "") + bfo + " Hz";
+  sendRadioConfig();
+  persistSettings();
+});
+
+squelchSlider.addEventListener("input", () => {
+  squelch = Number(squelchSlider.value);
+  squelchValue.textContent = squelch > 0 ? squelch + " dB" : "off";
+  sendRadioConfig();
+  persistSettings();
+});
+
+nrSlider.addEventListener("input", () => {
+  nr = Number(nrSlider.value);
+  nrValue.textContent = nr > 0 ? fmtHz(nr) : "off";
   sendRadioConfig();
   persistSettings();
 });
@@ -1495,6 +1515,8 @@ const DEFAULT_SETTINGS = {
   smoothing: 0,
   bfo: 0,
   autoFloor: false,
+  squelch: 0,
+  nr: 0,
 };
 
 function loadSettings() {
@@ -1509,7 +1531,7 @@ function loadSettings() {
 function persistSettings() {
   localStorage.setItem("sdr-settings", JSON.stringify({
     minDb, wfSpeed, spectrumRate, smoothing, tone, bfo, volume,
-    demodMode, audioBandwidth, gain, deemphasis, autoFloor,
+    demodMode, audioBandwidth, gain, deemphasis, autoFloor, squelch, nr,
   }));
 }
 
@@ -1527,6 +1549,8 @@ function applySettings() {
   smoothing = s.smoothing;
   bfo = s.bfo;
   autoFloor = s.autoFloor;
+  squelch = s.squelch;
+  nr = s.nr;
 
   floorSlider.value = minDb;
   speedSlider.value = wfSpeed;
@@ -1535,6 +1559,8 @@ function applySettings() {
   toneSlider.value = tone;
   bfoSlider.value = bfo;
   autoFloorToggle.checked = autoFloor;
+  squelchSlider.value = squelch;
+  nrSlider.value = nr;
   volSlider.value = volume;
   demodSelect.value = demodMode;
   deemphSelect.value = deemphasis;
@@ -1549,6 +1575,8 @@ function applySettings() {
   smoothValue.textContent = Math.round(smoothing * 100) + "%";
   toneValue.textContent = tone === 0 ? "flat" : (tone > 0 ? "+" : "") + (tone * 6).toFixed(1) + " dB";
   bfoValue.textContent = (bfo > 0 ? "+" : "") + bfo + " Hz";
+  squelchValue.textContent = squelch > 0 ? squelch + " dB" : "off";
+  nrValue.textContent = nr > 0 ? fmtHz(nr) : "off";
   volValue.textContent = Math.round(volume * 100) + "%";
   bwValue.textContent = fmtHz(audioBandwidth);
   pitchControl.classList.toggle("hidden", !(demodMode === "usb" || demodMode === "lsb"));

@@ -74,8 +74,9 @@ browsers.
 - **Themes** — pick Black, Dark, Midnight, Amber, Light, Solarized, Nord, or Terminal
   (phosphor-green) from the top-right selector; your choice is remembered.
 - **Audio demodulation** — AM / NBFM / WFM / USB / LSB, with a bandwidth control, volume,
-  FM de-emphasis (50/75 µs), a tone tilt EQ, SSB **pitch** (BFO) fine-tune, and a soft
-  limiter to reduce clipping.
+  FM de-emphasis (50/75 µs), a tone tilt EQ, SSB **pitch** (BFO) fine-tune, a soft
+  limiter to reduce clipping, and **noise tools**: a **squelch** (mutes below an SNR
+  threshold) and a **noise-reduction** low-pass to cut hiss.
 - **Keyboard shortcuts** — arrow keys nudge the frequency (Shift = coarser), `+`/`-`
   zoom, space pauses the waterfall, and `L` / `R` toggle listen/record.
 - **AI assistant** (Ollama tool-calling) that can *control* the radio and *reason* about
