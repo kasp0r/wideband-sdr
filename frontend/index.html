@@ -12,7 +12,7 @@
     } catch (e) {}
   </script>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-  <link rel="stylesheet" href="style.css?v=39" />
+  <link rel="stylesheet" href="style.css?v=40" />
 </head>
 <body>
   <header id="topbar">
@@ -47,6 +47,7 @@
           <option value="terminal">Terminal</option>
         </select>
       </div>
+      <button id="helpBtn" title="Help & keyboard shortcuts">?</button>
     </div>
     <div id="audioRow">
       <div class="group">
@@ -226,6 +227,36 @@
   </main>
 
   <script src="lib.js?v=1"></script>
-  <script src="app.js?v=42"></script>
+  <div id="helpOverlay" class="hidden">
+    <div id="helpDialog">
+      <div id="helpHeader">
+        <span>📖 Help</span>
+        <button id="helpClose" title="Close">✕</button>
+      </div>
+      <div id="helpBody">
+        <h3>Getting started</h3>
+        <ul>
+          <li><b>SDR connection</b> — enter the rtl_tcp host and port, then click <b>Connect</b>.</li>
+          <li><b>Tune</b> — click anywhere on the spectrum or waterfall, or type a frequency (MHz) and click <b>Tune</b>. Click and drag to pan.</li>
+          <li><b>Listen</b> — click <b>Listen</b> to hear audio, then pick the <b>Demod</b> mode (WFM for broadcast FM, NBFM, AM, USB/LSB) and <b>BW</b> (filter width).</li>
+          <li><b>Zoom</b> — scroll on the spectrum or use the <b>Zoom</b> slider; double-click to reset.</li>
+          <li><b>Noise</b> — <b>Squelch</b> mutes weak signals, <b>NR</b> cuts hiss, <b>Tone</b> tilts the EQ, and <b>Pitch</b> fine-tunes SSB.</li>
+          <li><b>AI assistant</b> — ask in plain English, e.g. "find the strongest FM stations".</li>
+          <li><b>↺ Reset</b> — clears saved settings; favourites are kept.</li>
+        </ul>
+        <h3>Keyboard shortcuts</h3>
+        <ul>
+          <li><kbd>←</kbd> <kbd>→</kbd> — nudge frequency (±1 kHz; <kbd>Shift</kbd> = ±10 kHz)</li>
+          <li><kbd>+</kbd> / <kbd>−</kbd> — zoom in / out</li>
+          <li><kbd>Space</kbd> — pause / resume the waterfall</li>
+          <li><kbd>L</kbd> — toggle listen</li>
+          <li><kbd>R</kbd> — toggle record</li>
+          <li><kbd>Esc</kbd> — close this dialog</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=43"></script>
 </body>
 </html>

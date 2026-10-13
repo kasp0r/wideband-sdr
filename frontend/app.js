@@ -1737,6 +1737,22 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// ---------- help dialog ----------
+const helpBtn = $("helpBtn");
+const helpOverlay = $("helpOverlay");
+const helpClose = $("helpClose");
+
+function setHelp(open) {
+  helpOverlay.classList.toggle("hidden", !open);
+}
+
+helpBtn.addEventListener("click", () => setHelp(true));
+helpClose.addEventListener("click", () => setHelp(false));
+helpOverlay.addEventListener("click", (e) => { if (e.target === helpOverlay) setHelp(false); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !helpOverlay.classList.contains("hidden")) setHelp(false);
+});
+
 // ---------- init ----------
 bindCanvasInteractions(spectrumCanvas);
 bindCanvasInteractions(waterfallCanvas);
