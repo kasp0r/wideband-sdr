@@ -68,12 +68,16 @@ browsers.
 - **Live spectrum + waterfall** with a frequency axis, peak labels, click-to-tune, a
   centre/tuned-frequency line, and a passband overlay showing the demod filter width.
   **Zoom** into any region with the mouse wheel or the zoom slider (double-click to
-  reset; smallest zoom set by `MIN_SPAN_HZ`), and **smooth** the trace with the Smooth
-  slider.
+  reset; smallest zoom set by `MIN_SPAN_HZ`), **smooth** the trace, and choose a
+  **colormap** (turbo/viridis/inferno/plasma/grayscale/green) from the waterfall bar. The
+  noise floor can be set manually or **auto-ranged** to the signal.
 - **Themes** — pick Black, Dark, Midnight, Amber, Light, Solarized, Nord, or Terminal
   (phosphor-green) from the top-right selector; your choice is remembered.
 - **Audio demodulation** — AM / NBFM / WFM / USB / LSB, with a bandwidth control, volume,
-  FM de-emphasis (50/75 µs), and a soft limiter to reduce clipping.
+  FM de-emphasis (50/75 µs), a tone tilt EQ, SSB **pitch** (BFO) fine-tune, and a soft
+  limiter to reduce clipping.
+- **Keyboard shortcuts** — arrow keys nudge the frequency (Shift = coarser), `+`/`-`
+  zoom, space pauses the waterfall, and `L` / `R` toggle listen/record.
 - **AI assistant** (Ollama tool-calling) that can *control* the radio and *reason* about
   the spectrum:
   - `get_status` / `get_spectrum` / `get_signal_metrics` — inspect state and signal quality,
@@ -294,9 +298,7 @@ these features; `scan` returns a list of them.
 ## Limitations / next steps
 
 - Modulation "hints" are bandwidth heuristics, not a full classifier (no cyclostationary
-  analysis). SSB has no BFO/pitch fine-tune yet.
-- The waterfall colormap is fixed (turbo); the noise floor is adjustable via the Floor
-  slider, but there is no auto-range yet.
+  analysis).
 - The app talks the rtl_tcp wire protocol directly (`backend/rtltcp.py`) rather than
   depending on `pyrtlsdr`, whose TCP client is incompatible with classic rtl_tcp.
 

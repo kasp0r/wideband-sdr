@@ -48,6 +48,17 @@ def test_usb_lsb_tone():
     assert abs(dominant_tone(lsb) - 1000) < 100
 
 
+def test_ssb_bfo_shifts_pitch():
+    # A BFO offset shifts the recovered SSB audio pitch (positive = higher), for both
+    # USB and LSB: a 1 kHz tone with a +500 Hz BFO should land at 1.5 kHz.
+    t = make_t(FS)
+    usb = np.exp(2j * np.pi * 1000 * t).astype(np.complex128)
+    lsb = np.exp(-2j * np.pi * 1000 * t).astype(np.complex128)
+    assert abs(dominant_tone(Demodulator(FS, "usb", bfo=500).process(usb, 0.0)) - 1500) < 100
+    assert abs(dominant_tone(Demodulator(FS, "lsb", bfo=500).process(lsb, 0.0)) - 1500) < 100
+    assert abs(dominant_tone(Demodulator(FS, "usb", bfo=-500).process(usb, 0.0)) - 500) < 100
+
+
 def test_bandwidth_narrows_filter():
     t = make_t(FS)
     env = 1 + 0.5 * np.cos(2 * np.pi * 1000 * t) + 0.5 * np.cos(2 * np.pi * 5000 * t)

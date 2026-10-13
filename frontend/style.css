@@ -193,6 +193,10 @@ button:hover { background: var(--card-hover); border-color: var(--muted); }
 #bwValue { min-width: 44px; color: var(--text); font-variant-numeric: tabular-nums; }
 #toneSlider { width: 80px; vertical-align: middle; }
 #toneValue { min-width: 44px; color: var(--text); font-variant-numeric: tabular-nums; }
+#bfoSlider { width: 90px; vertical-align: middle; }
+#bfoValue { min-width: 50px; color: var(--text); font-variant-numeric: tabular-nums; }
+#pitchControl { display: contents; }
+#pitchControl.hidden { display: none; }
 .hz { color: var(--muted); }
 
 main {

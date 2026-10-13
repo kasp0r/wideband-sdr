@@ -29,6 +29,7 @@ const axisEl = $("axis");
 const freqInput = $("freqInput");
 const floorSlider = $("floorSlider");
 const floorValue = $("floorValue");
+const autoFloorToggle = $("autoFloorToggle");
 const speedSlider = $("speedSlider");
 const speedValue = $("speedValue");
 const scopeSlider = $("scopeSlider");
@@ -56,6 +57,9 @@ const bwValue = $("bwValue");
 const deemphSelect = $("deemphSelect");
 const toneSlider = $("toneSlider");
 const toneValue = $("toneValue");
+const bfoSlider = $("bfoSlider");
+const bfoValue = $("bfoValue");
+const pitchControl = $("pitchControl");
 const volSlider = $("volSlider");
 const volValue = $("volValue");
 
@@ -164,6 +168,8 @@ const COLORMAPS = {
 };
 let activeColormap = "turbo";
 let minDb = -60, maxDb = 0; // shared spectrum/waterfall dB range (floor adjustable)
+let autoFloor = false; // auto-range the floor to the noise floor
+let lastMetrics = null; // last spectrum metrics (for auto-floor)
 
 function colormap(v) {
   const stops = COLORMAPS[activeColormap] || COLORMAPS.turbo;
@@ -477,6 +483,8 @@ function connectWS() {
       applySmoothing();
       peaksCache = null; // power changed → recompute peaks lazily
       bandChip.textContent = d.band || "—";
+      lastMetrics = d.metrics;
+      if (autoFloor) applyAutoFloor(d.metrics);
       renderInspector(d.metrics);
       if (!document.activeElement || document.activeElement !== freqInput) {
         freqInput.value = (centerHz / 1e6).toFixed(3);
@@ -974,6 +982,7 @@ let listening = false;
 let bwDragging = false;
 let deemphasis = "75us";
 let tone = 0; // -1..1 tilt EQ (tone control)
+let bfo = 0; // Hz: SSB beat-frequency offset (audio pitch)
 let volume = 0.3; // 30% default, to avoid blasting ears on first listen
 let lastConfigSent = 0;
 let recording = false;
@@ -1040,7 +1049,7 @@ function stopListening() {
 function sendRadioConfig() {
   lastConfigSent = Date.now();
   if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: "config", mode: demodMode, bandwidth: audioBandwidth, deemphasis, tone }));
+    ws.send(JSON.stringify({ type: "config", mode: demodMode, bandwidth: audioBandwidth, deemphasis, tone, bfo }));
   }
 }
 
@@ -1220,6 +1229,8 @@ function updateBandwidthUI() {
   audioBandwidth = DEMOD_BW[demodMode];
   bwSlider.value = audioBandwidth;
   bwValue.textContent = fmtHz(audioBandwidth);
+  // SSB pitch (BFO) only applies to USB/LSB.
+  pitchControl.classList.toggle("hidden", !(demodMode === "usb" || demodMode === "lsb"));
 }
 
 bwSlider.addEventListener("pointerdown", () => { bwDragging = true; });
@@ -1253,6 +1264,13 @@ toneSlider.addEventListener("input", () => {
   persistSettings();
 });
 
+bfoSlider.addEventListener("input", () => {
+  bfo = Number(bfoSlider.value);
+  bfoValue.textContent = (bfo > 0 ? "+" : "") + bfo + " Hz";
+  sendRadioConfig();
+  persistSettings();
+});
+
 // ---------- waterfall / status controls ----------
 function updateWfReadouts() {
   floorValue.textContent = Math.round(minDb) + " dB";
@@ -1272,11 +1290,32 @@ function renderSpectrumThrottled() {
   }
 }
 
+function applyAutoFloor(metrics) {
+  if (!metrics || metrics.noise_floor_db == null) return;
+  const target = Math.round(metrics.noise_floor_db - 10);
+  const lo = Number(floorSlider.min), hi = Number(floorSlider.max);
+  const clamped = Math.max(lo, Math.min(hi, target));
+  if (clamped !== minDb) {
+    minDb = clamped;
+    floorSlider.value = clamped;
+    floorValue.textContent = clamped + " dB";
+    renderLegend();
+  }
+}
+
 floorSlider.addEventListener("input", () => {
   minDb = Number(floorSlider.value);
+  // Manual adjustment turns auto-range off.
+  if (autoFloor) { autoFloor = false; autoFloorToggle.checked = false; }
   renderLegend();
   renderSpectrum();
   updateWfReadouts();
+  persistSettings();
+});
+
+autoFloorToggle.addEventListener("change", () => {
+  autoFloor = autoFloorToggle.checked;
+  if (autoFloor) applyAutoFloor(lastMetrics);
   persistSettings();
 });
 speedSlider.addEventListener("input", () => {
@@ -1454,6 +1493,8 @@ const DEFAULT_SETTINGS = {
   gain: "auto",
   deemphasis: "75us",
   smoothing: 0,
+  bfo: 0,
+  autoFloor: false,
 };
 
 function loadSettings() {
@@ -1467,8 +1508,8 @@ function loadSettings() {
 
 function persistSettings() {
   localStorage.setItem("sdr-settings", JSON.stringify({
-    minDb, wfSpeed, spectrumRate, smoothing, tone, volume,
-    demodMode, audioBandwidth, gain, deemphasis,
+    minDb, wfSpeed, spectrumRate, smoothing, tone, bfo, volume,
+    demodMode, audioBandwidth, gain, deemphasis, autoFloor,
   }));
 }
 
@@ -1484,12 +1525,16 @@ function applySettings() {
   gain = s.gain;
   deemphasis = s.deemphasis;
   smoothing = s.smoothing;
+  bfo = s.bfo;
+  autoFloor = s.autoFloor;
 
   floorSlider.value = minDb;
   speedSlider.value = wfSpeed;
   scopeSlider.value = spectrumRate;
   smoothSlider.value = Math.round(smoothing * 100);
   toneSlider.value = tone;
+  bfoSlider.value = bfo;
+  autoFloorToggle.checked = autoFloor;
   volSlider.value = volume;
   demodSelect.value = demodMode;
   deemphSelect.value = deemphasis;
@@ -1503,8 +1548,10 @@ function applySettings() {
   scopeValue.textContent = spectrumRate + " Hz";
   smoothValue.textContent = Math.round(smoothing * 100) + "%";
   toneValue.textContent = tone === 0 ? "flat" : (tone > 0 ? "+" : "") + (tone * 6).toFixed(1) + " dB";
+  bfoValue.textContent = (bfo > 0 ? "+" : "") + bfo + " Hz";
   volValue.textContent = Math.round(volume * 100) + "%";
   bwValue.textContent = fmtHz(audioBandwidth);
+  pitchControl.classList.toggle("hidden", !(demodMode === "usb" || demodMode === "lsb"));
 }
 
 // ---------- drawers (collapsible right-hand panes) ----------
@@ -1608,6 +1655,24 @@ audioToggle.addEventListener("click", () => {
 try {
   if (localStorage.getItem("sdr-audio-row") === "0") setAudioRow(false);
 } catch (e) { /* ignore */ }
+
+// ---------- keyboard shortcuts ----------
+document.addEventListener("keydown", (e) => {
+  const el = document.activeElement;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA"
+             || el.tagName === "SELECT" || el.isContentEditable)) {
+    return; // don't hijack typing
+  }
+  switch (e.key) {
+    case "ArrowLeft":  tune(centerHz - (e.shiftKey ? 10000 : 1000)); e.preventDefault(); break;
+    case "ArrowRight": tune(centerHz + (e.shiftKey ? 10000 : 1000)); e.preventDefault(); break;
+    case "+": case "=": setZoom(viewSpan / 1.25); e.preventDefault(); break;
+    case "-": case "_": setZoom(viewSpan * 1.25); e.preventDefault(); break;
+    case " ": pauseBtn.click(); e.preventDefault(); break;
+    case "l": case "L": listenBtn.click(); break;
+    case "r": case "R": recordBtn.click(); break;
+  }
+});
 
 // ---------- init ----------
 bindCanvasInteractions(spectrumCanvas);

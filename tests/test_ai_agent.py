@@ -10,6 +10,7 @@ class FakeRadio:
         self.audio_bandwidth = None
         self.audio_tone = 0
         self.audio_deemphasis = 75e-6
+        self.audio_bfo = 0
 
     def status(self):
         self.calls.append(("status",))
@@ -57,6 +58,10 @@ class FakeRadio:
     def set_audio_deemphasis(self, deemphasis):
         self.calls.append(("set_audio_deemphasis", deemphasis))
         self.audio_deemphasis = deemphasis
+
+    def set_audio_bfo(self, bfo):
+        self.calls.append(("set_audio_bfo", bfo))
+        self.audio_bfo = bfo
 
     def set_sample_rate(self, sample_rate):
         self.calls.append(("set_sample_rate", sample_rate))
@@ -141,6 +146,13 @@ def test_set_deemphasis_dispatch():
     res = _execute_tool("set_deemphasis", {"deemphasis": "50us"}, r)
     assert r.calls == [("set_audio_deemphasis", "50us")]
     assert res["deemphasis"] == "50us"
+
+
+def test_set_pitch_dispatch():
+    r = FakeRadio()
+    res = _execute_tool("set_pitch", {"bfo_hz": 500}, r)
+    assert r.calls == [("set_audio_bfo", 500.0)]
+    assert res["bfo_hz"] == 500.0
 
 
 def test_build_context_not_connected():

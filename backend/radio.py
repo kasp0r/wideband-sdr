@@ -44,6 +44,7 @@ class Radio:
         self.audio_bandwidth = None  # None = use the mode's default
         self.audio_deemphasis = 75e-6  # seconds (FM de-emphasis time constant)
         self.audio_tone = 0.0  # -1..1 tilt EQ (tone control)
+        self.audio_bfo = 0.0  # Hz: SSB beat-frequency offset (audio pitch)
         self.audio_queue = queue.Queue(maxsize=64)
         self._demod = None
         self._audio_parts = []
@@ -174,6 +175,10 @@ class Radio:
         self.audio_tone = float(tone)
         self._demod = None  # recreate lazily
 
+    def set_audio_bfo(self, bfo):
+        self.audio_bfo = float(bfo)
+        self._demod = None  # recreate lazily
+
     def effective_bandwidth(self):
         if self.audio_bandwidth is not None:
             return self.audio_bandwidth
@@ -191,11 +196,13 @@ class Radio:
                 or (self.audio_bandwidth is not None
                     and self._demod.bandwidth != self.audio_bandwidth)
                 or self._demod.deemphasis_tau != self.audio_deemphasis
-                or self._demod.tone != self.audio_tone):
+                or self._demod.tone != self.audio_tone
+                or self._demod.bfo != self.audio_bfo):
             self._demod = demod.Demodulator(
                 self.sample_rate, self.audio_mode, self.audio_bandwidth,
                 deemphasis_tau=self.audio_deemphasis,
                 tone=self.audio_tone,
+                bfo=self.audio_bfo,
             )
         self._audio_parts.append(iq)
         self._audio_len += len(iq)
