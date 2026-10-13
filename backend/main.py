@@ -220,6 +220,12 @@ async def ws_endpoint(ws: WebSocket):
                     radio.set_audio_deemphasis(data["deemphasis"])
                 if data.get("tone") is not None:
                     radio.set_audio_tone(float(data["tone"]))
+                if data.get("bfo") is not None:
+                    radio.set_audio_bfo(float(data["bfo"]))
+                if data.get("nr") is not None:
+                    radio.set_audio_nr(float(data["nr"]))
+                if data.get("squelch") is not None:
+                    radio.set_audio_squelch(float(data["squelch"]))
     except WebSocketDisconnect:
         pass
     finally:
@@ -252,6 +258,12 @@ async def ws_audio(ws: WebSocket):
                     radio.set_audio_deemphasis(data["deemphasis"])
                 if data.get("tone") is not None:
                     radio.set_audio_tone(float(data["tone"]))
+                if data.get("bfo") is not None:
+                    radio.set_audio_bfo(float(data["bfo"]))
+                if data.get("nr") is not None:
+                    radio.set_audio_nr(float(data["nr"]))
+                if data.get("squelch") is not None:
+                    radio.set_audio_squelch(float(data["squelch"]))
             elif t == "bandwidth":
                 if data.get("bandwidth"):
                     radio.set_audio_bandwidth(int(data["bandwidth"]))

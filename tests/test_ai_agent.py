@@ -10,6 +10,9 @@ class FakeRadio:
         self.audio_bandwidth = None
         self.audio_tone = 0
         self.audio_deemphasis = 75e-6
+        self.audio_bfo = 0
+        self.audio_nr = 0
+        self.audio_squelch = 0
 
     def status(self):
         self.calls.append(("status",))
@@ -57,6 +60,18 @@ class FakeRadio:
     def set_audio_deemphasis(self, deemphasis):
         self.calls.append(("set_audio_deemphasis", deemphasis))
         self.audio_deemphasis = deemphasis
+
+    def set_audio_bfo(self, bfo):
+        self.calls.append(("set_audio_bfo", bfo))
+        self.audio_bfo = bfo
+
+    def set_audio_nr(self, cutoff):
+        self.calls.append(("set_audio_nr", cutoff))
+        self.audio_nr = cutoff
+
+    def set_audio_squelch(self, threshold):
+        self.calls.append(("set_audio_squelch", threshold))
+        self.audio_squelch = threshold
 
     def set_sample_rate(self, sample_rate):
         self.calls.append(("set_sample_rate", sample_rate))
@@ -141,6 +156,22 @@ def test_set_deemphasis_dispatch():
     res = _execute_tool("set_deemphasis", {"deemphasis": "50us"}, r)
     assert r.calls == [("set_audio_deemphasis", "50us")]
     assert res["deemphasis"] == "50us"
+
+
+def test_set_pitch_dispatch():
+    r = FakeRadio()
+    res = _execute_tool("set_pitch", {"bfo_hz": 500}, r)
+    assert r.calls == [("set_audio_bfo", 500.0)]
+    assert res["bfo_hz"] == 500.0
+
+
+def test_set_squelch_and_nr_dispatch():
+    r = FakeRadio()
+    sq = _execute_tool("set_squelch", {"threshold_db": 12}, r)
+    nr = _execute_tool("set_noise_reduction", {"cutoff_hz": 3000}, r)
+    assert r.calls == [("set_audio_squelch", 12.0), ("set_audio_nr", 3000.0)]
+    assert sq["squelch_db"] == 12.0
+    assert nr["nr_cutoff_hz"] == 3000.0
 
 
 def test_build_context_not_connected():

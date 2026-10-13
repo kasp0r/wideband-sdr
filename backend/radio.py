@@ -44,6 +44,9 @@ class Radio:
         self.audio_bandwidth = None  # None = use the mode's default
         self.audio_deemphasis = 75e-6  # seconds (FM de-emphasis time constant)
         self.audio_tone = 0.0  # -1..1 tilt EQ (tone control)
+        self.audio_bfo = 0.0  # Hz: SSB beat-frequency offset (audio pitch)
+        self.audio_nr = 0.0  # Hz: noise-reduction low-pass cutoff (0 = off)
+        self.audio_squelch = 0.0  # dB: mute audio below this SNR (0 = off)
         self.audio_queue = queue.Queue(maxsize=64)
         self._demod = None
         self._audio_parts = []
@@ -174,6 +177,17 @@ class Radio:
         self.audio_tone = float(tone)
         self._demod = None  # recreate lazily
 
+    def set_audio_bfo(self, bfo):
+        self.audio_bfo = float(bfo)
+        self._demod = None  # recreate lazily
+
+    def set_audio_nr(self, cutoff):
+        self.audio_nr = float(cutoff)
+        self._demod = None  # recreate lazily
+
+    def set_audio_squelch(self, threshold):
+        self.audio_squelch = float(threshold)
+
     def effective_bandwidth(self):
         if self.audio_bandwidth is not None:
             return self.audio_bandwidth
@@ -185,17 +199,27 @@ class Radio:
             self._audio_parts = []
             self._audio_len = 0
 
+    def _squelch_open(self):
+        m = self._metrics
+        if not m or not m.get("signal_detected"):
+            return False
+        return float(m.get("snr_db", 0.0)) >= self.audio_squelch
+
     def _process_audio(self, iq):
         if (self._demod is None or self._demod.sample_rate != self.sample_rate
                 or self._demod.mode != self.audio_mode
                 or (self.audio_bandwidth is not None
                     and self._demod.bandwidth != self.audio_bandwidth)
                 or self._demod.deemphasis_tau != self.audio_deemphasis
-                or self._demod.tone != self.audio_tone):
+                or self._demod.tone != self.audio_tone
+                or self._demod.bfo != self.audio_bfo
+                or self._demod.nr_cutoff != self.audio_nr):
             self._demod = demod.Demodulator(
                 self.sample_rate, self.audio_mode, self.audio_bandwidth,
                 deemphasis_tau=self.audio_deemphasis,
                 tone=self.audio_tone,
+                bfo=self.audio_bfo,
+                nr_cutoff=self.audio_nr,
             )
         self._audio_parts.append(iq)
         self._audio_len += len(iq)
@@ -204,6 +228,9 @@ class Radio:
             self._audio_parts = []
             self._audio_len = 0
             audio = self._demod.process(chunk, 0.0)
+            # Squelch: mute the audio when the tuned signal's SNR is below threshold.
+            if self.audio_squelch > 0 and not self._squelch_open():
+                audio = np.zeros_like(audio)
             if len(audio):
                 try:
                     self.audio_queue.put_nowait(audio)

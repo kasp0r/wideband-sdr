@@ -51,12 +51,14 @@ def _deemphasize(x, fs, tau):
 
 
 class Demodulator:
-    def __init__(self, sample_rate, mode="wfm", bandwidth=None, deemphasis_tau=75e-6, tone=0.0):
+    def __init__(self, sample_rate, mode="wfm", bandwidth=None, deemphasis_tau=75e-6, tone=0.0, bfo=0.0, nr_cutoff=0.0):
         self.sample_rate = int(sample_rate)
         self.mode = mode
         self.bandwidth = int(bandwidth) if bandwidth else DEFAULT_BANDWIDTH.get(mode, 16_000)
         self.deemphasis_tau = deemphasis_tau
         self.tone = float(tone)
+        self.bfo = float(bfo)  # SSB beat-frequency offset (Hz): shifts the audio pitch
+        self.nr_cutoff = float(nr_cutoff)  # audio low-pass cutoff (Hz): 0 = off
         self.audio_rate = AUDIO_RATE
         self._sample_pos = 0  # cumulative samples, keeps the NCO phase continuous
         self._peak = None     # smoothed audio peak for AGC
@@ -69,6 +71,12 @@ class Demodulator:
 
     def set_tone(self, tone):
         self.tone = float(tone)
+
+    def set_bfo(self, bfo):
+        self.bfo = float(bfo)
+
+    def set_nr(self, cutoff):
+        self.nr_cutoff = float(cutoff)
 
     def _audio_cutoff(self):
         b = self.bandwidth
@@ -90,8 +98,15 @@ class Demodulator:
         t = (np.arange(n) + self._sample_pos) / fs
         self._sample_pos += n
         x = np.asarray(iq, dtype=np.complex128)
-        if offset_hz:
-            x = x * np.exp(-2j * np.pi * offset_hz * t)
+        # Bring the target to the demodulator input. For SSB, a BFO offset shifts
+        # the recovered audio's pitch (positive = higher, for both USB and LSB).
+        shift = offset_hz
+        if self.mode == "usb":
+            shift -= self.bfo
+        elif self.mode == "lsb":
+            shift += self.bfo
+        if shift:
+            x = x * np.exp(-2j * np.pi * shift * t)
 
         cutoff = self._audio_cutoff()
         if self.mode == "wfm":
@@ -106,6 +121,9 @@ class Demodulator:
             audio = np.zeros(0, dtype=np.float64)
 
         audio = self._tone(audio)
+        # Noise reduction: an extra audio low-pass to roll off high-frequency hiss.
+        if self.nr_cutoff > 0:
+            audio = _lowpass(audio, self.audio_rate, self.nr_cutoff)
         return self._normalize(audio).astype(np.float32)
 
     # ---- demod primitives ----
@@ -127,7 +145,7 @@ class Demodulator:
     def _ssb(self, x, fs, audio_cutoff):
         # With the (suppressed) carrier placed at DC, the sideband is analytic
         # (USB, positive freqs) or anti-analytic (LSB, negative freqs); the real
-        # part recovers the message. (Approximate: no BFO/pitch control yet.)
+        # part recovers the message. A BFO offset is applied upstream in process().
         xr = _resample(x, fs, self.audio_rate)
         audio = np.real(xr)
         return _lowpass(audio, self.audio_rate, audio_cutoff)

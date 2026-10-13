@@ -17,7 +17,7 @@ Guidelines:
   range; `characterize` analyzes one signal.
 - `set_demod_mode` picks the demodulator (am/nbfm/wfm/usb/lsb); `set_bandwidth` sets the
   IF filter width in Hz; `set_gain` adjusts gain (dB or "auto"); `set_sample_rate` changes
-  the SDR sample rate.
+  the SDR sample rate; `set_pitch` shifts the SSB audio pitch (BFO) for USB/LSB.
 - `get_signal_metrics` returns quantitative measurements of the tuned signal (SNR, tuning
   error, bandwidth, modulation hint, adjacent interference).
 - When a user asks to "find", "go to", or "tune to" a signal, use `scan` or `tune` as needed.
@@ -185,6 +185,42 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_pitch",
+            "description": "Set the SSB beat-frequency offset (audio pitch) in Hz, for USB/LSB modes.",
+            "parameters": {
+                "type": "object",
+                "properties": {"bfo_hz": {"type": "number", "description": "Offset in Hz (e.g. -2000 to 2000)"}},
+                "required": ["bfo_hz"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_squelch",
+            "description": "Set the squelch threshold in dB (0 = off): mutes audio below this SNR.",
+            "parameters": {
+                "type": "object",
+                "properties": {"threshold_db": {"type": "number", "description": "SNR threshold in dB, 0 = off"}},
+                "required": ["threshold_db"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_noise_reduction",
+            "description": "Set the audio noise-reduction low-pass cutoff in Hz (0 = off), to cut high-frequency hiss.",
+            "parameters": {
+                "type": "object",
+                "properties": {"cutoff_hz": {"type": "number", "description": "Cutoff in Hz, 0 = off"}},
+                "required": ["cutoff_hz"],
+            },
+        },
+    },
 ]
 
 
@@ -199,9 +235,12 @@ def _build_context(radio):
                 lines.append(f"Frequency correction {s['freq_correction_ppm']} ppm")
             de = {75e-6: "75 µs", 50e-6: "50 µs", 0.0: "off"}.get(
                 radio.audio_deemphasis, f"{radio.audio_deemphasis * 1e6:.0f} µs")
+            extra = f", pitch {radio.audio_bfo:+.0f} Hz" if radio.audio_mode in ("usb", "lsb") else ""
+            sq = "off" if radio.audio_squelch <= 0 else f"{radio.audio_squelch:.0f} dB"
+            nr = "off" if radio.audio_nr <= 0 else f"{radio.audio_nr:.0f} Hz"
             lines.append(
                 f"Demod {radio.audio_mode.upper()}, IF bandwidth {radio.effective_bandwidth()} Hz, "
-                f"de-emphasis {de}, tone {radio.audio_tone:+.2f}"
+                f"de-emphasis {de}, tone {radio.audio_tone:+.2f}{extra}, squelch {sq}, NR {nr}"
             )
     except Exception:
         pass
@@ -305,6 +344,15 @@ def _execute_tool(name, args, radio):
         if name == "set_deemphasis":
             radio.set_audio_deemphasis(args["deemphasis"])
             return {"ok": True, "deemphasis": args["deemphasis"]}
+        if name == "set_pitch":
+            radio.set_audio_bfo(float(args["bfo_hz"]))
+            return {"ok": True, "bfo_hz": radio.audio_bfo}
+        if name == "set_squelch":
+            radio.set_audio_squelch(float(args["threshold_db"]))
+            return {"ok": True, "squelch_db": radio.audio_squelch}
+        if name == "set_noise_reduction":
+            radio.set_audio_nr(float(args["cutoff_hz"]))
+            return {"ok": True, "nr_cutoff_hz": radio.audio_nr}
         return {"error": f"unknown tool: {name}"}
     except Exception as e:  # noqa: BLE001
         return {"error": f"tool {name} failed: {e}"}

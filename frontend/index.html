@@ -12,7 +12,7 @@
     } catch (e) {}
   </script>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-  <link rel="stylesheet" href="style.css?v=37" />
+  <link rel="stylesheet" href="style.css?v=39" />
 </head>
 <body>
   <header id="topbar">
@@ -81,9 +81,20 @@
           <option value="50us">50µs (Europe)</option>
           <option value="off">off</option>
         </select>
+        <span id="pitchControl" class="hidden">
+          <label title="SSB beat-frequency offset (audio pitch), for USB/LSB.">Pitch</label>
+          <input type="range" id="bfoSlider" min="-2000" max="2000" step="10" value="0" />
+          <span id="bfoValue">0 Hz</span>
+        </span>
         <label>Tone</label>
         <input type="range" id="toneSlider" min="-1" max="1" step="0.1" value="0" />
         <span id="toneValue">flat</span>
+        <label title="Squelch: mute audio below this SNR (0 = off).">Squelch</label>
+        <input type="range" id="squelchSlider" min="0" max="30" step="1" value="0" />
+        <span id="squelchValue">off</span>
+        <label title="Noise reduction: audio low-pass cutoff to cut high-frequency hiss (0 = off).">NR</label>
+        <input type="range" id="nrSlider" min="0" max="10000" step="500" value="0" />
+        <span id="nrValue">off</span>
         <label>Vol</label>
         <input type="range" id="volSlider" min="0" max="1.5" step="0.05" value="0.3" />
         <span id="volValue">30%</span>
@@ -112,6 +123,9 @@
           <input type="range" id="floorSlider" min="-120" max="-20" step="1" value="-60" />
         </label>
         <span id="floorValue">-60 dB</span>
+        <label title="Auto-range the noise floor to the signal.">
+          <input type="checkbox" id="autoFloorToggle" /> Auto
+        </label>
         <label title="Waterfall scroll speed (rows per spectrum frame).">Speed
           <input type="range" id="speedSlider" min="1" max="10" step="1" value="2" />
         </label>
@@ -211,6 +225,6 @@
   </main>
 
   <script src="lib.js?v=1"></script>
-  <script src="app.js?v=38"></script>
+  <script src="app.js?v=40"></script>
 </body>
 </html>
