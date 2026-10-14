@@ -70,6 +70,104 @@ def test_scan_normalizes_reversed_range():
     assert res["scanned_hz"] == [100_000_000, 100_050_000]
 
 
+class _StubSdr:
+    """Minimal stand-in for RtlTcpClient so control methods can run without a dongle."""
+
+    def __init__(self):
+        self.calls = []
+
+    def set_center_freq(self, f):
+        self.calls.append(("freq", int(f)))
+
+    def set_sample_rate(self, r):
+        self.calls.append(("rate", int(r)))
+
+    def set_gain_mode(self, m):
+        self.calls.append(("gain_mode", m))
+
+    def set_gain(self, g):
+        self.calls.append(("gain", g))
+
+    def set_freq_correction(self, p):
+        self.calls.append(("ppm", int(p)))
+
+
+def _radio_with_stub():
+    r = Radio()
+    r.sdr = _StubSdr()
+    r.connected = True
+    return r
+
+
+def test_tune_clamps_out_of_range():
+    r = _radio_with_stub()
+    lo, hi = config.MIN_FREQ_HZ, config.MAX_FREQ_HZ
+
+    res = r.tune(1_000)  # far below the hardware floor
+    assert r.center_freq == lo
+    assert res["clamped"] is True
+    assert res["requested_hz"] == 1_000
+
+    res = r.tune(99_000_000_000)  # far above the hardware ceiling
+    assert r.center_freq == hi
+    assert res["clamped"] is True
+
+
+def test_tune_within_range_not_clamped():
+    r = _radio_with_stub()
+    res = r.tune(100_000_000)
+    assert r.center_freq == 100_000_000
+    assert res.get("clamped") is not True
+
+
+def test_set_sample_rate_rejects_out_of_range():
+    r = _radio_with_stub()
+    before = r.sample_rate
+    assert "error" in r.set_sample_rate(1_000)      # below hardware min
+    assert "error" in r.set_sample_rate(99_000_000)  # above hardware max
+    assert r.sample_rate == before  # unchanged on rejection
+    assert "error" not in r.set_sample_rate(2_400_000)
+
+
+def test_set_gain_rejects_invalid():
+    r = _radio_with_stub()
+    assert "error" in r.set_gain(-10)
+    assert "error" in r.set_gain(999)
+    assert "error" in r.set_gain("banana")
+
+    res = r.set_gain(19.7)
+    assert "error" not in res
+    assert r.gain == 19.7
+
+    res = r.set_gain("auto")
+    assert "error" not in res
+    assert r.gain == "auto"
+
+
+def test_scan_honours_cancellation():
+    r = _fake_radio(sample_rate=1_000_000)
+
+    def cancel_later():
+        time.sleep(0.03)
+        r.cancel_scan()
+
+    t = threading.Thread(target=cancel_later, daemon=True)
+    t.start()
+    res = r.scan(100_000_000, 200_000_000, step_hz=50_000, dwell=0.2, max_steps=1000)
+    t.join()
+
+    assert res["cancelled"] is True
+    assert res["restored_center_hz"] == 100_000_000
+    assert r.tuned[-1] == 100_000_000  # tuning restored even when cancelled
+
+
+def test_disconnect_cancels_scan():
+    r = Radio()
+    r._scan_cancel.clear()
+    r.disconnect()
+    assert r._scan_cancel.is_set()
+
+
 class ReconnectMock:
     """rtl_tcp mock that drops its *first* connection after `drop_after` seconds,
     then holds subsequent (re)connections open so the client can verify reconnect."""

@@ -1,4 +1,18 @@
-"""Radio controller: owns the single rtl_tcp connection and the DSP reader thread."""
+"""Radio controller: owns the single rtl_tcp connection and the DSP reader thread.
+
+Threading contract:
+- The reader thread (``_reader_loop``) is the only thread that touches ``sdr``
+  (socket I/O), ``_spectrum_data``, ``_metrics``, ``latest_spectrum``, and the
+  audio pipeline (``_audio_parts``, ``_demod``). It swaps those references
+  atomically, so request threads can read them safely under the GIL.
+- Request/API threads mutate control settings (``center_freq``, ``gain``,
+  ``sample_rate``, audio parameters) under ``self.lock``. The reader thread reads
+  the same settings without the lock; they are plain value assignments, so a
+  stale value for one frame is harmless. The one place this matters (``_demod``)
+  is snapshotted into a local inside ``_process_audio`` to avoid a torn read.
+- ``scan``/``characterize`` run on whatever thread the caller uses; cancellation
+  is signalled via ``_scan_cancel`` (an ``Event``) and honoured cooperatively.
+"""
 import logging
 import queue
 import threading
@@ -38,6 +52,7 @@ class Radio:
         self._metrics = None  # cached signal metrics (recomputed every N frames)
         self._frame_count = 0
         self.seq = 0
+        self._scan_cancel = threading.Event()  # cooperative scan/characterize cancellation
 
         # audio demodulation
         self.audio_enabled = False
@@ -80,6 +95,7 @@ class Radio:
 
     def disconnect(self):
         self.running = False
+        self._scan_cancel.set()  # abort any in-flight scan/characterize sweep
         self._run_id += 1  # invalidate any in-flight reader loop so it exits
         if self._thread is not None:
             self._thread.join(timeout=1.0)
@@ -92,6 +108,10 @@ class Radio:
                     pass
                 self.sdr = None
             self.connected = False
+
+    def cancel_scan(self):
+        """Request cooperative cancellation of any in-flight scan()/characterize()."""
+        self._scan_cancel.set()
 
     def set_freq_correction(self, ppm):
         self.freq_correction = int(ppm)
@@ -117,6 +137,15 @@ class Radio:
             time.sleep(0.1)
         return self.running
 
+    def _scan_wait(self, seconds):
+        """Sleep in short slices, returning False early if a scan is cancelled."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if self._scan_cancel.is_set():
+                return False
+            time.sleep(min(0.05, max(0.0, end - time.monotonic())))
+        return True
+
     def _apply_gain(self, gain):
         if gain == "auto" or gain is None:
             self.sdr.set_gain_mode(False)
@@ -126,33 +155,54 @@ class Radio:
     # ---- control (thread-safe via self.lock) ----
     def tune(self, freq_hz):
         freq_hz = int(freq_hz)
+        lo, hi = config.MIN_FREQ_HZ, config.MAX_FREQ_HZ
+        clamped = min(max(freq_hz, lo), hi)
         with self.lock:
             if self.sdr is None:
                 return {"error": "not connected"}
-            self.sdr.set_center_freq(freq_hz)
-            self.center_freq = freq_hz
-        return self.status()
+            self.sdr.set_center_freq(clamped)
+            self.center_freq = clamped
+        result = self.status()
+        if clamped != freq_hz:
+            result["clamped"] = True
+            result["requested_hz"] = freq_hz
+        return result
 
     def fine_tune(self, offset_hz):
         return self.tune(self.center_freq + int(offset_hz))
 
     def set_gain(self, gain):
+        if gain == "auto" or gain is None:
+            manual = False
+            gain_value = None
+        else:
+            try:
+                gain_value = float(gain)
+            except (TypeError, ValueError):
+                return {"error": f"invalid gain: {gain!r}"}
+            if not (config.MIN_GAIN_DB <= gain_value <= config.MAX_GAIN_DB):
+                return {"error": f"gain {gain_value} dB out of range "
+                                 f"[{config.MIN_GAIN_DB}, {config.MAX_GAIN_DB}]"}
+            manual = True
         with self.lock:
             if self.sdr is None:
                 return {"error": "not connected"}
             try:
-                if gain == "auto" or gain is None:
+                if manual:
+                    self.sdr.set_gain(gain_value)
+                    self.gain = gain_value
+                else:
                     self.sdr.set_gain_mode(False)
                     self.gain = "auto"
-                else:
-                    self.sdr.set_gain(float(gain))
-                    self.gain = float(gain)
             except Exception as e:
                 return {"error": f"gain rejected: {e}"}
         return self.status()
 
     def set_sample_rate(self, sample_rate):
         sample_rate = int(sample_rate)
+        if not (config.MIN_SAMPLE_RATE <= sample_rate <= config.MAX_SAMPLE_RATE):
+            return {"error": f"sample rate {sample_rate} Hz out of range "
+                             f"[{config.MIN_SAMPLE_RATE}, {config.MAX_SAMPLE_RATE}]"}
         with self.lock:
             if self.sdr is None:
                 return {"error": "not connected"}
@@ -210,28 +260,38 @@ class Radio:
         return float(m.get("snr_db", 0.0)) >= self.audio_squelch
 
     def _process_audio(self, iq):
-        if (self._demod is None or self._demod.sample_rate != self.sample_rate
-                or self._demod.mode != self.audio_mode
-                or (self.audio_bandwidth is not None
-                    and self._demod.bandwidth != self.audio_bandwidth)
-                or self._demod.deemphasis_tau != self.audio_deemphasis
-                or self._demod.tone != self.audio_tone
-                or self._demod.bfo != self.audio_bfo
-                or self._demod.nr_cutoff != self.audio_nr):
-            self._demod = demod.Demodulator(
-                self.sample_rate, self.audio_mode, self.audio_bandwidth,
-                deemphasis_tau=self.audio_deemphasis,
-                tone=self.audio_tone,
-                bfo=self.audio_bfo,
-                nr_cutoff=self.audio_nr,
+        # Snapshot the settings into locals so a concurrent set_audio_*() from a
+        # request thread cannot tear between the check below and the .process()
+        # call (which would otherwise read self._demod as None mid-flight).
+        mode = self.audio_mode
+        bandwidth = self.audio_bandwidth
+        deemphasis = self.audio_deemphasis
+        tone = self.audio_tone
+        bfo = self.audio_bfo
+        nr = self.audio_nr
+        demod_inst = self._demod
+        if (demod_inst is None or demod_inst.sample_rate != self.sample_rate
+                or demod_inst.mode != mode
+                or (bandwidth is not None and demod_inst.bandwidth != bandwidth)
+                or demod_inst.deemphasis_tau != deemphasis
+                or demod_inst.tone != tone
+                or demod_inst.bfo != bfo
+                or demod_inst.nr_cutoff != nr):
+            demod_inst = demod.Demodulator(
+                self.sample_rate, mode, bandwidth,
+                deemphasis_tau=deemphasis,
+                tone=tone,
+                bfo=bfo,
+                nr_cutoff=nr,
             )
+            self._demod = demod_inst
         self._audio_parts.append(iq)
         self._audio_len += len(iq)
         if self._audio_len >= self.audio_chunk:
             chunk = np.concatenate(self._audio_parts)
             self._audio_parts = []
             self._audio_len = 0
-            audio = self._demod.process(chunk, 0.0)
+            audio = demod_inst.process(chunk, 0.0)
             # Squelch: mute the audio when the tuned signal's SNR is below threshold.
             if self.audio_squelch > 0 and not self._squelch_open():
                 audio = np.zeros_like(audio)
@@ -350,10 +410,14 @@ class Radio:
         freq_hz = freq_hz if freq_hz is not None else self.center_freq
         if not self.connected:
             return {"error": "not connected"}
+        self._scan_cancel.clear()
         span = self.sample_rate
         if abs(freq_hz - self.center_freq) > span / 2:
             self.tune(freq_hz)
-            time.sleep(0.15)
+            if not self._scan_wait(0.15):
+                return {"freq_hz": freq_hz, "cancelled": True}
+        if self._scan_cancel.is_set():
+            return {"freq_hz": freq_hz, "cancelled": True}
         snap = self.spectrum_snapshot(top_n=200, threshold_db=6.0)
         peaks = snap.get("peaks", [])
         if not peaks:
@@ -361,8 +425,15 @@ class Radio:
         best = min(peaks, key=lambda p: abs(p["freq_hz"] - freq_hz))
         return best
 
-    def scan(self, start_hz, stop_hz, step_hz=None, dwell=0.15, max_steps=1000):
-        """Sweep [start_hz, stop_hz) and collect signals, restoring tuning after."""
+    def scan(self, start_hz, stop_hz, step_hz=None, dwell=0.15, max_steps=1000,
+             max_wall_time=None):
+        """Sweep [start_hz, stop_hz) and collect signals, restoring tuning after.
+
+        Cancellation is cooperative: ``cancel_scan()`` (or a disconnect) sets a
+        flag checked each step and during each dwell slice. A hard wall-clock cap
+        (``max_wall_time``) additionally bounds the sweep even if cancellation is
+        never requested, so a single call can't tie up a worker thread forever.
+        """
         if not self.connected:
             return {"error": "not connected"}
         start_hz, stop_hz = int(start_hz), int(stop_hz)
@@ -377,17 +448,26 @@ class Radio:
         if step < min_step:
             step = min_step
 
+        self._scan_cancel.clear()
+        deadline = time.monotonic() + (max_wall_time or config.SCAN_MAX_WALL_TIME)
+
         original = self.center_freq
         found = []
         truncated = False
+        cancelled = False
         steps = 0
         freq = start_hz
         while freq < stop_hz:
-            if steps >= max_steps:
+            if self._scan_cancel.is_set():
+                cancelled = True
+                break
+            if steps >= max_steps or time.monotonic() >= deadline:
                 truncated = True
                 break
             self.tune(freq)
-            time.sleep(dwell)
+            if not self._scan_wait(dwell):
+                cancelled = True
+                break
             snap = self.spectrum_snapshot(top_n=10, threshold_db=10.0)
             for p in snap.get("peaks", []):
                 if start_hz <= p["freq_hz"] < stop_hz:
@@ -412,4 +492,5 @@ class Radio:
             "signals": signals,
             "restored_center_hz": original,
             "truncated": truncated,
+            "cancelled": cancelled,
         }
