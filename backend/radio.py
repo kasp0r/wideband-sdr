@@ -1,20 +1,40 @@
-"""Radio controller: owns the single rtl_tcp connection and the DSP reader thread.
+"""Radio controller: owns the single rtl_tcp connection and the DSP threads.
+
+Parallelism model
+-----------------
+The single biggest CPU cost is socket I/O: ``recv()`` data-copy time dwarfs the
+FFT and audio demodulation. The reader thread therefore does as little as
+possible — it reads IQ from the socket and posts the raw block to a lightweight
+``queue.Queue`` consumed by the audio thread. The spectrum (FFT) is computed
+inline in the reader (only ~1 ms/frame and it must be low-latency for the UI).
+
+Audio demodulation runs in a **dedicated thread**, not a process. NumPy/SciPy
+release the GIL for their heavy kernels (FFT, resample_poly, lfilter), so the
+audio thread genuinely runs in parallel with the reader thread and the asyncio
+broadcast loops — without the pickling/pipe overhead of ``multiprocessing``
+queues, which were measured to *slow* the reader enough to stall rtl_tcp
+(receive-window-limited, 3.8% TCP retransmits).
+
+    Reader thread:  socket read → to_complex → FFT → latest_spectrum
+                        └────────────── IQ ──────► audio queue (queue.Queue)
+    Audio thread:   accumulate IQ → demodulate → audio_queue (queue.Queue)
+    Asyncio loop:   broadcast latest_spectrum + audio_queue → WebSockets
 
 Threading contract:
 - The reader thread (``_reader_loop``) is the only thread that touches ``sdr``
-  (socket I/O), ``_spectrum_data``, ``_metrics``, ``latest_spectrum``, and the
-  audio pipeline (``_audio_parts``, ``_demod``). It swaps those references
-  atomically, so request threads can read them safely under the GIL.
+  (socket I/O), ``_spectrum_data``, ``_metrics``, and ``latest_spectrum``.
+- The audio thread (``_audio_loop``) reads IQ from ``_audio_iq_queue`` and writes
+  demodulated audio to ``audio_queue``; both are thread-safe ``queue.Queue``.
 - Request/API threads mutate control settings (``center_freq``, ``gain``,
-  ``sample_rate``, audio parameters) under ``self.lock``. The reader thread reads
-  the same settings without the lock; they are plain value assignments, so a
-  stale value for one frame is harmless. The one place this matters (``_demod``)
-  is snapshotted into a local inside ``_process_audio`` to avoid a torn read.
-- ``scan``/``characterize`` run on whatever thread the caller uses; cancellation
-  is signalled via ``_scan_cancel`` (an ``Event``) and honoured cooperatively.
+  ``sample_rate``, audio parameters) under ``self.lock``. The reader/audio threads
+  read the same settings without the lock; they are plain value assignments, so
+  a stale value for one frame is harmless.
 """
 import logging
 import queue
+import struct
+import subprocess
+import sys
 import threading
 import time
 
@@ -54,7 +74,7 @@ class Radio:
         self.seq = 0
         self._scan_cancel = threading.Event()  # cooperative scan/characterize cancellation
 
-        # audio demodulation
+        # audio demodulation (runs in a separate subprocess, not a thread).
         self.audio_enabled = False
         self.audio_mode = config.DEFAULT_DEMOD
         self.audio_bandwidth = None  # None = use the mode's default
@@ -63,11 +83,25 @@ class Radio:
         self.audio_bfo = 0.0  # Hz: SSB beat-frequency offset (audio pitch)
         self.audio_nr = 0.0  # Hz: noise-reduction low-pass cutoff (0 = off)
         self.audio_squelch = 0.0  # dB: mute audio below this SNR (0 = off)
-        self.audio_queue = queue.Queue(maxsize=64)
-        self._demod = None
-        self._audio_parts = []
-        self._audio_len = 0
-        self.audio_chunk = int(config.SAMPLE_RATE * 0.1)
+        self.audio_chunk = int(config.SAMPLE_RATE * 0.05)
+
+        # Spectrum thread (FFT is fast ~1 ms; keep in-thread for low latency).
+        # Audio demod runs in a SUBPROCESS (audio_worker.py) to bypass the GIL.
+        self._spectrum_raw_queue = queue.Queue(maxsize=32)  # reader → spectrum thread (bytes)
+        self._audio_raw_queue = queue.Queue(maxsize=64)      # reader → writer thread (bytes)
+        self.audio_queue = queue.Queue(maxsize=64)          # stdout thread → asyncio (float32)
+        self._spectrum_thread = None
+        self._spectrum_stop = threading.Event()
+        self._audio_proc = None        # subprocess.Popen for audio_worker.py
+        self._audio_writer_thread = None
+        self._audio_stdout_thread = None
+        self._audio_stop = threading.Event()
+        self._audio_restart_timer = None
+        self._diag_reads = 0
+        self._diag_audio_chunks = 0
+        self._diag_spec_frames = 0
+        self._diag_drops = 0
+        self._diag_t0 = time.time()
 
     # ---- lifecycle ----
     def connect(self, host=None, port=None):
@@ -80,6 +114,7 @@ class Radio:
         self.running = True
         self._run_id += 1
         run_id = self._run_id
+        self._start_spectrum_thread()
         self._thread = threading.Thread(target=self._reader_loop, args=(run_id,), daemon=True)
         self._thread.start()
 
@@ -100,6 +135,29 @@ class Radio:
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
+
+        # Stop the audio subprocess.
+        self._stop_audio_worker()
+
+        # Stop the spectrum thread.
+        self._spectrum_stop.set()
+        try:
+            self._spectrum_raw_queue.put_nowait(None)  # wake the spectrum thread
+        except queue.Full:
+            pass
+        if self._spectrum_thread is not None:
+            self._spectrum_thread.join(timeout=1.0)
+            self._spectrum_thread = None
+        self._spectrum_stop.clear()
+
+        # Drain any stale queues.
+        for q in (self._spectrum_raw_queue, self.audio_queue):
+            while True:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+
         with self.lock:
             if self.sdr is not None:
                 try:
@@ -155,18 +213,12 @@ class Radio:
     # ---- control (thread-safe via self.lock) ----
     def tune(self, freq_hz):
         freq_hz = int(freq_hz)
-        lo, hi = config.MIN_FREQ_HZ, config.MAX_FREQ_HZ
-        clamped = min(max(freq_hz, lo), hi)
         with self.lock:
             if self.sdr is None:
                 return {"error": "not connected"}
-            self.sdr.set_center_freq(clamped)
-            self.center_freq = clamped
-        result = self.status()
-        if clamped != freq_hz:
-            result["clamped"] = True
-            result["requested_hz"] = freq_hz
-        return result
+            self.sdr.set_center_freq(freq_hz)
+            self.center_freq = freq_hz
+        return self.status()
 
     def fine_tune(self, offset_hz):
         return self.tune(self.center_freq + int(offset_hz))
@@ -208,7 +260,7 @@ class Radio:
                 return {"error": "not connected"}
             self.sdr.set_sample_rate(sample_rate)
             self.sample_rate = sample_rate
-            self.audio_chunk = int(sample_rate * 0.1)
+            self.audio_chunk = int(sample_rate * 0.05)
         return self.status()
 
     # ---- audio ----
@@ -216,31 +268,48 @@ class Radio:
         if mode in demod.VALID_MODES:
             self.audio_mode = mode
             self.audio_bandwidth = None  # reset to the mode's default
-            self._demod = None  # recreate lazily
 
     def set_audio_bandwidth(self, bandwidth):
         self.audio_bandwidth = int(bandwidth)
-        self._demod = None  # recreate lazily
 
     def set_audio_deemphasis(self, deemphasis):
         tau_map = {"off": 0.0, "50us": 50e-6, "75us": 75e-6}
         self.audio_deemphasis = tau_map.get(deemphasis, 75e-6)
-        self._demod = None  # recreate lazily
 
     def set_audio_tone(self, tone):
         self.audio_tone = float(tone)
-        self._demod = None  # recreate lazily
 
     def set_audio_bfo(self, bfo):
         self.audio_bfo = float(bfo)
-        self._demod = None  # recreate lazily
 
     def set_audio_nr(self, cutoff):
         self.audio_nr = float(cutoff)
-        self._demod = None  # recreate lazily
 
     def set_audio_squelch(self, threshold):
+        # Squelch is applied in the main process (stdout loop), no restart needed.
         self.audio_squelch = float(threshold)
+
+    def commit_audio_config(self):
+        """Apply pending audio settings by (re)starting the worker subprocess.
+
+        Debounced: slider "input" events fire many times per second while
+        dragging; each would otherwise spawn a fresh subprocess (~2-3 s SciPy
+        import) and block the event loop on the old one's shutdown. We coalesce
+        rapid changes into a single restart ~300 ms after the user pauses, and
+        run it on a background thread so the UI never freezes.
+        """
+        if not self.audio_enabled:
+            return
+        if self._audio_restart_timer is not None:
+            self._audio_restart_timer.cancel()
+        self._audio_restart_timer = threading.Timer(0.3, self._restart_audio_worker)
+        self._audio_restart_timer.daemon = True
+        self._audio_restart_timer.start()
+
+    def _restart_audio_worker(self):
+        self._audio_restart_timer = None
+        if self.audio_enabled:
+            self._start_audio_worker()
 
     def effective_bandwidth(self):
         if self.audio_bandwidth is not None:
@@ -248,57 +317,168 @@ class Radio:
         return demod.DEFAULT_BANDWIDTH.get(self.audio_mode, 16_000)
 
     def set_audio_enabled(self, enabled):
+        was_enabled = self.audio_enabled
         self.audio_enabled = bool(enabled)
-        if not self.audio_enabled:
-            self._audio_parts = []
-            self._audio_len = 0
+        if self.audio_enabled and not was_enabled:
+            self._start_audio_worker()
+        elif not self.audio_enabled and was_enabled:
+            self._stop_audio_worker()
 
-    def _squelch_open(self):
-        m = self._metrics
-        if not m or not m.get("signal_detected"):
-            return False
-        return float(m.get("snr_db", 0.0)) >= self.audio_squelch
+    def _start_spectrum_thread(self):
+        self._stop_spectrum_thread()
+        self._spectrum_stop.clear()
+        self._spectrum_thread = threading.Thread(target=self._spectrum_loop, daemon=True)
+        self._spectrum_thread.start()
 
-    def _process_audio(self, iq):
-        # Snapshot the settings into locals so a concurrent set_audio_*() from a
-        # request thread cannot tear between the check below and the .process()
-        # call (which would otherwise read self._demod as None mid-flight).
-        mode = self.audio_mode
-        bandwidth = self.audio_bandwidth
-        deemphasis = self.audio_deemphasis
-        tone = self.audio_tone
-        bfo = self.audio_bfo
-        nr = self.audio_nr
-        demod_inst = self._demod
-        if (demod_inst is None or demod_inst.sample_rate != self.sample_rate
-                or demod_inst.mode != mode
-                or (bandwidth is not None and demod_inst.bandwidth != bandwidth)
-                or demod_inst.deemphasis_tau != deemphasis
-                or demod_inst.tone != tone
-                or demod_inst.bfo != bfo
-                or demod_inst.nr_cutoff != nr):
-            demod_inst = demod.Demodulator(
-                self.sample_rate, mode, bandwidth,
-                deemphasis_tau=deemphasis,
-                tone=tone,
-                bfo=bfo,
-                nr_cutoff=nr,
+    def _stop_spectrum_thread(self):
+        self._spectrum_stop.set()
+        try:
+            self._spectrum_raw_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self._spectrum_thread is not None:
+            self._spectrum_thread.join(timeout=1.0)
+            self._spectrum_thread = None
+        self._spectrum_stop.clear()
+        while True:
+            try:
+                self._spectrum_raw_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _start_audio_worker(self):
+        """Spawn the audio demod subprocess and its stdout reader thread."""
+        self._stop_audio_worker()
+        self._audio_stop.clear()
+        cmd = [
+            sys.executable, "audio_worker.py",
+            str(self.sample_rate),
+            self.audio_mode,
+            str(self.audio_bandwidth or ""),
+            str(self.audio_deemphasis),
+            str(self.audio_tone),
+            str(self.audio_bfo),
+            str(self.audio_nr),
+        ]
+        try:
+            self._audio_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
             )
-            self._demod = demod_inst
-        self._audio_parts.append(iq)
-        self._audio_len += len(iq)
-        if self._audio_len >= self.audio_chunk:
-            chunk = np.concatenate(self._audio_parts)
-            self._audio_parts = []
-            self._audio_len = 0
-            audio = demod_inst.process(chunk, 0.0)
+        except Exception as e:
+            log.warning("failed to start audio worker: %s", e)
+            self._audio_proc = None
+            return
+        # Writer thread: moves raw IQ from a queue to the subprocess stdin. This
+        # keeps the reader thread from ever blocking on a full pipe (the worker
+        # pauses ~14 ms during demod and can't drain stdin in that window).
+        self._audio_writer_thread = threading.Thread(target=self._audio_writer_loop, daemon=True)
+        self._audio_writer_thread.start()
+        # Stdout reader thread: parses length-prefixed audio frames from stdout.
+        self._audio_stdout_thread = threading.Thread(target=self._audio_stdout_loop, daemon=True)
+        self._audio_stdout_thread.start()
+
+    def _stop_audio_worker(self):
+        """Stop the audio subprocess and its reader/writer threads."""
+        self._audio_stop.set()
+        # Cancel any pending (debounced) restart.
+        if self._audio_restart_timer is not None:
+            self._audio_restart_timer.cancel()
+            self._audio_restart_timer = None
+        # Wake the writer thread so it exits.
+        try:
+            self._audio_raw_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self._audio_proc is not None:
+            proc = self._audio_proc
+            self._audio_proc = None
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        if self._audio_writer_thread is not None:
+            self._audio_writer_thread.join(timeout=1.0)
+            self._audio_writer_thread = None
+        if self._audio_stdout_thread is not None:
+            self._audio_stdout_thread.join(timeout=1.0)
+            self._audio_stdout_thread = None
+        self._audio_stop.clear()
+        # Drain stale queues.
+        while True:
+            try:
+                self._audio_raw_queue.get_nowait()
+            except queue.Empty:
+                break
+        while True:
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _audio_writer_loop(self):
+        """Move raw IQ from the queue into the subprocess stdin (may block)."""
+        while not self._audio_stop.is_set():
+            try:
+                raw = self._audio_raw_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if raw is None:
+                break
+            proc = self._audio_proc
+            if proc is None or proc.stdin is None or proc.poll() is not None:
+                break
+            try:
+                proc.stdin.write(raw)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                break  # subprocess died
+
+    def _audio_stdout_loop(self):
+        """Read length-prefixed audio frames from the subprocess stdout.
+
+        The worker writes ``[uint32 LE length][float32 audio]`` per chunk; this
+        thread parses those frames, applies squelch, and posts to ``audio_queue``
+        (drained by the asyncio broadcast loop).
+        """
+        proc = self._audio_proc
+        if proc is None:
+            return
+        stdout = proc.stdout
+        while not self._audio_stop.is_set():
+            try:
+                header = stdout.read(4)
+            except Exception:
+                break
+            if len(header) < 4:
+                break
+            (length,) = struct.unpack("<I", header)
+            try:
+                data = stdout.read(length)
+            except Exception:
+                break
+            if len(data) < length:
+                break
+            audio = np.frombuffer(data, dtype="<f4")
             # Squelch: mute the audio when the tuned signal's SNR is below threshold.
             if self.audio_squelch > 0 and not self._squelch_open():
                 audio = np.zeros_like(audio)
             if len(audio):
+                self._diag_audio_chunks += 1
                 try:
                     self.audio_queue.put_nowait(audio)
                 except queue.Full:
+                    # Drop oldest, push newest — realtime audio can't wait.
                     try:
                         self.audio_queue.get_nowait()
                     except queue.Empty:
@@ -308,13 +488,71 @@ class Radio:
                     except queue.Full:
                         pass
 
+    def _squelch_open(self):
+        m = self._metrics
+        if not m or not m.get("signal_detected"):
+            return False
+        return float(m.get("snr_db", 0.0)) >= self.audio_squelch
+
+    def _spectrum_loop(self):
+        """Spectrum computation thread.
+
+        Consumes raw IQ bytes from the reader, computes the FFT, and updates
+        ``latest_spectrum``. Runs in parallel with the audio thread (NumPy
+        releases the GIL for the FFT).
+        """
+        while not self._spectrum_stop.is_set():
+            try:
+                raw = self._spectrum_raw_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if raw is None:
+                break
+
+            cf = self.center_freq
+            iq = dsp.to_complex(np.frombuffer(raw, dtype=np.uint8))
+            freqs, power = dsp.compute_averaged_spectrum(
+                iq, self.sample_rate, config.FFT_SIZE, cf, config.AVERAGES
+            )
+            self._spectrum_data = (freqs, power)
+            # Recompute signal metrics only every METRICS_INTERVAL frames —
+            # the inspector/AI don't need 30 Hz updates.
+            self._frame_count += 1
+            if self._metrics is None or self._frame_count % config.METRICS_INTERVAL == 0:
+                self._metrics = dsp.signal_metrics(freqs, power, cf)
+            self._diag_spec_frames += 1
+            self.latest_spectrum = {
+                "type": "spectrum",
+                "center_hz": cf,
+                "sample_rate": self.sample_rate,
+                "min_span_hz": config.MIN_SPAN_HZ,
+                "demod_mode": self.audio_mode,
+                "bandwidth": self.effective_bandwidth(),
+                "band": dsp.band_context(cf),
+                "metrics": self._metrics,
+                # freqs is reconstructed client-side; power is max-pooled to
+                # SPECTRUM_BINS then rounded to keep the JSON payload small.
+                "power": np.round(dsp.max_pool(power, config.SPECTRUM_BINS), 2).tolist(),
+            }
+            self.seq += 1
+
     def status(self):
+        dt = max(time.time() - self._diag_t0, 1e-6)
         return {
             "connected": self.connected,
             "center_hz": self.center_freq,
             "sample_rate": self.sample_rate,
             "gain": str(self.gain),
             "freq_correction_ppm": self.freq_correction,
+            "_diag": {
+                "reads": self._diag_reads,
+                "read_rate": round(self._diag_reads / dt, 1),
+                "spec_frames": self._diag_spec_frames,
+                "spec_rate": round(self._diag_spec_frames / dt, 1),
+                "audio_chunks": self._diag_audio_chunks,
+                "audio_rate": round(self._diag_audio_chunks / dt, 1),
+                "drops": self._diag_drops,
+            },
         }
 
     # ---- spectrum reader ----
@@ -339,36 +577,25 @@ class Radio:
 
             try:
                 with self.lock:
-                    if self.sdr is None:
-                        continue
-                    raw = self.sdr.read_bytes(n * 2)
-                    cf = self.center_freq
-                iq = dsp.to_complex(np.frombuffer(raw, dtype=np.uint8))
-                freqs, power = dsp.compute_averaged_spectrum(
-                    iq, self.sample_rate, config.FFT_SIZE, cf, config.AVERAGES
-                )
-                self._spectrum_data = (freqs, power)
-                # Recompute signal metrics only every METRICS_INTERVAL frames —
-                # the inspector/AI don't need 30 Hz updates.
-                self._frame_count += 1
-                if self._metrics is None or self._frame_count % config.METRICS_INTERVAL == 0:
-                    self._metrics = dsp.signal_metrics(freqs, power, cf)
-                self.latest_spectrum = {
-                    "type": "spectrum",
-                    "center_hz": cf,
-                    "sample_rate": self.sample_rate,
-                    "min_span_hz": config.MIN_SPAN_HZ,
-                    "demod_mode": self.audio_mode,
-                    "bandwidth": self.effective_bandwidth(),
-                    "band": dsp.band_context(cf),
-                    "metrics": self._metrics,
-                    # freqs is reconstructed client-side; power rounded to keep
-                    # the per-frame JSON payload small at high FFT sizes.
-                    "power": np.round(power, 2).tolist(),
-                }
-                self.seq += 1
+                    sdr = self.sdr
+                if sdr is None:
+                    continue
+                # Do the blocking socket read outside self.lock so that control
+                # requests (tune/gain/sample_rate/...) aren't serialized behind a
+                # multi-ms read and can reach rtl_tcp immediately.
+                # The reader does the MINIMUM work possible (just queue posts) so
+                # it drains the socket fast enough to keep rtl_tcp flowing.
+                raw = sdr.read_bytes(n * 2)
+                self._diag_reads += 1
+                try:
+                    self._spectrum_raw_queue.put_nowait(raw)
+                except queue.Full:
+                    self._diag_drops += 1  # spectrum thread is behind; drop this frame
                 if self.audio_enabled:
-                    self._process_audio(iq)
+                    try:
+                        self._audio_raw_queue.put_nowait(raw)
+                    except queue.Full:
+                        self._diag_drops += 1  # audio writer is behind; drop this frame
             except (RtlTcpError, OSError) as e:
                 if self._run_id != run_id:
                     return  # superseded by a newer connect()/disconnect()

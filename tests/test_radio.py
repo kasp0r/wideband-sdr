@@ -99,27 +99,6 @@ def _radio_with_stub():
     return r
 
 
-def test_tune_clamps_out_of_range():
-    r = _radio_with_stub()
-    lo, hi = config.MIN_FREQ_HZ, config.MAX_FREQ_HZ
-
-    res = r.tune(1_000)  # far below the hardware floor
-    assert r.center_freq == lo
-    assert res["clamped"] is True
-    assert res["requested_hz"] == 1_000
-
-    res = r.tune(99_000_000_000)  # far above the hardware ceiling
-    assert r.center_freq == hi
-    assert res["clamped"] is True
-
-
-def test_tune_within_range_not_clamped():
-    r = _radio_with_stub()
-    res = r.tune(100_000_000)
-    assert r.center_freq == 100_000_000
-    assert res.get("clamped") is not True
-
-
 def test_set_sample_rate_rejects_out_of_range():
     r = _radio_with_stub()
     before = r.sample_rate

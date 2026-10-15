@@ -12,6 +12,8 @@ const bandChip = $("bandChip");
 const signalDot = $("signalDot");
 const signalStatus = $("signalStatus");
 const mSnr = $("mSnr");
+const mFreq = $("mFreq");
+const mPow = $("mPow");
 const mErr = $("mErr");
 const mBw = $("mBw");
 const mAdj = $("mAdj");
@@ -175,6 +177,7 @@ let activeColormap = "turbo";
 let minDb = -60, maxDb = 0; // shared spectrum/waterfall dB range (floor adjustable)
 let autoFloor = false; // auto-range the floor to the noise floor
 let lastMetrics = null; // last spectrum metrics (for auto-floor)
+let currentSignalHz = null; // detected signal frequency (for click-to-tune)
 
 function colormap(v) {
   const stops = COLORMAPS[activeColormap] || COLORMAPS.turbo;
@@ -506,7 +509,10 @@ function connectWS() {
         viewSpan = sampleRate; // reset zoom when the hardware span changes
         configureZoomControls();
       }
-      if (centerChanged) smoothBuf = null; // don't crossfade across a retune
+      if (centerChanged) {
+        smoothBuf = null; // don't crossfade across a retune
+        lastSpectrumDraw = 0; // redraw the trace immediately on retune (bypass throttle)
+      }
       applySmoothing();
       peaksCache = null; // power changed → recompute peaks lazily
       bandChip.textContent = d.band || "—";
@@ -1014,7 +1020,7 @@ document.querySelectorAll(".chip").forEach((chip) => {
 });
 
 // ---------- audio (demod + playback) ----------
-let audioCtx = null, gainNode = null, scriptNode = null, audioWS = null;
+let audioCtx = null, gainNode = null, audioNode = null, scriptNode = null, audioWS = null;
 let audioChunks = [];
 let listening = false;
 let bwDragging = false;
@@ -1031,34 +1037,41 @@ let recordStart = 0;
 let recordMeta = null;
 let recordTimer = null;
 
-function startListening() {
+async function startListening() {
   if (listening) return;
   listening = true;
   listenBtn.textContent = "🔇 Stop";
   listenBtn.classList.add("listening");
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-  gainNode = audioCtx.createGain();
-  gainNode.gain.value = volume;
-  gainNode.connect(audioCtx.destination);
-  scriptNode = audioCtx.createScriptProcessor(4096, 0, 1);
-  scriptNode.onaudioprocess = onAudioProcess;
-  scriptNode.connect(gainNode);
-  audioChunks = [];
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    // Some browsers start suspended until a user gesture; resume() makes sure
+    // audio actually flows. It's a no-op if already running.
+    if (audioCtx.state === "suspended") await audioCtx.resume();
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = volume;
+    gainNode.connect(audioCtx.destination);
+    if (typeof audioCtx.audioWorklet !== "undefined") {
+      // Modern path: AudioWorklet runs on the dedicated audio thread.
+      await audioCtx.audioWorklet.addModule("audio-worklet.js");
+      audioNode = new AudioWorkletNode(audioCtx, "sdr-audio-processor");
+      audioNode.connect(gainNode);
+    } else {
+      // Fallback for browsers without AudioWorklet: ScriptProcessor.
+      scriptNode = audioCtx.createScriptProcessor(4096, 0, 1);
+      scriptNode.onaudioprocess = onAudioProcess;
+      scriptNode.connect(gainNode);
+      audioChunks = [];
+    }
+  } catch (e) {
+    console.error("failed to start audio:", e);
+    addActivity("⚠️ audio failed: " + (e && e.message ? e.message : e));
+    listening = false;
+    listenBtn.textContent = "🔊 Listen";
+    listenBtn.classList.remove("listening");
+    if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
+    return;
+  }
   openAudioWS();
-}
-
-function openAudioWS() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  audioWS = new WebSocket(`${proto}://${location.host}/ws/audio`);
-  audioWS.binaryType = "arraybuffer";
-  audioWS.onmessage = (ev) => {
-    if (typeof ev.data === "string") return; // JSON info frame
-    const chunk = new Float32Array(ev.data);
-    audioChunks.push(chunk);
-    if (recording) recordChunks.push(chunk);
-  };
-  audioWS.onopen = () => {};
-  audioWS.onclose = () => { if (listening) setTimeout(openAudioWS, 1000); };
 }
 
 function onAudioProcess(e) {
@@ -1074,12 +1087,28 @@ function onAudioProcess(e) {
   }
 }
 
+function openAudioWS() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  audioWS = new WebSocket(`${proto}://${location.host}/ws/audio`);
+  audioWS.binaryType = "arraybuffer";
+  audioWS.onmessage = (ev) => {
+    if (typeof ev.data === "string") return; // JSON info frame
+    const chunk = new Float32Array(ev.data);
+    if (recording) recordChunks.push(chunk);
+    if (audioNode) audioNode.port.postMessage(chunk);
+    else if (scriptNode) audioChunks.push(chunk);
+  };
+  audioWS.onopen = () => {};
+  audioWS.onclose = () => { if (listening) setTimeout(openAudioWS, 1000); };
+}
+
 function stopListening() {
   if (recording) stopRecording();
   listening = false;
   listenBtn.textContent = "🔊 Listen";
   listenBtn.classList.remove("listening");
   if (audioWS) { audioWS.onclose = null; audioWS.close(); audioWS = null; }
+  if (audioNode) { audioNode.disconnect(); audioNode = null; }
   if (scriptNode) { scriptNode.disconnect(); scriptNode = null; }
   if (gainNode) { gainNode.disconnect(); gainNode = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -1420,17 +1449,36 @@ function renderInspector(m) {
   signalDot.classList.toggle("locked", locked);
   signalStatus.textContent = locked ? "detected" : "no signal";
   if (!locked) {
-    mSnr.textContent = mErr.textContent = mBw.textContent = mAdj.textContent = mSignals.textContent = "—";
+    currentSignalHz = null;
+    mSnr.textContent = mFreq.textContent = mPow.textContent = "—";
+    mErr.textContent = mBw.textContent = mAdj.textContent = mSignals.textContent = "—";
+    mSnr.style.color = "";
+    mFreq.style.cursor = "";
     mFloor.textContent = (m.noise_floor_db != null ? m.noise_floor_db.toFixed(1) : "—") + " dB";
     return;
   }
-  mSnr.textContent = m.snr_db.toFixed(1) + " dB";
+  currentSignalHz = m.signal_hz;
+  // SNR color coding: strong (green), fair (amber), weak (red).
+  const snr = m.snr_db;
+  mSnr.textContent = snr.toFixed(1) + " dB";
+  mSnr.style.color = snr >= 20 ? "#39d353" : snr >= 10 ? "#d29922" : "#f85149";
+  mFreq.textContent = (m.signal_hz / 1e6).toFixed(3) + " MHz";
+  mFreq.style.cursor = "pointer";
+  mPow.textContent = m.power_db.toFixed(1) + " dB";
   mErr.textContent = (m.tuning_error_hz >= 0 ? "+" : "") + fmtHz(m.tuning_error_hz);
   mBw.textContent = fmtHz(m.bandwidth_hz);
   mAdj.textContent = m.adjacent_interference_db.toFixed(1) + " dB";
   mSignals.textContent = m.num_signals_in_view + " in view";
   mFloor.textContent = m.noise_floor_db.toFixed(1) + " dB";
 }
+
+// Click-to-tune on the detected signal frequency.
+mFreq.addEventListener("click", () => {
+  if (currentSignalHz != null) {
+    tune(currentSignalHz);
+    addActivity("tuned to signal " + (currentSignalHz / 1e6).toFixed(3) + " MHz");
+  }
+});
 
 function addActivity(text) {
   const d = document.createElement("div");
