@@ -34,8 +34,10 @@ radio, and much more.
 
 Wideband-SDR is a browser front end plus a FastAPI backend that speaks the classic
 **rtl_tcp** wire protocol directly (no `pyrtlsdr` dependency) and runs the DSP (FFT +
-demodulation) server-side. An **Ollama** tool-calling agent adds a natural-language control
-plane on top — `tune`, `scan`, `characterize`, `optimize`, and more.
+demodulation) server-side. Audio demodulation runs in a separate subprocess so the
+GIL-bound spectrum/WebSocket work can't starve playback. An **Ollama** tool-calling
+agent adds a natural-language control plane on top — `tune`, `scan`, `characterize`,
+`optimize`, and more.
 
 ```mermaid
 flowchart LR
@@ -76,8 +78,10 @@ browsers.
   limiter to reduce clipping.
 - **Noise tools** — a **squelch** (mutes audio below an SNR threshold, with a marker drawn
   on the spectrum) and a **noise-reduction** low-pass to cut hiss.
-- **Reception aids** — ★ **favourites** (saved frequencies with demod mode + bandwidth)
-  and **audio recording** to WAV with embedded metadata.
+- **Reception aids** — a **signal inspector** panel showing SNR (colour-coded),
+  detected signal frequency (click-to-tune), power, bandwidth, tune error, adjacent
+  interference, and noise floor; plus ★ **favourites** (saved frequencies with demod
+  mode + bandwidth) and **audio recording** to WAV with embedded metadata.
 - **AI assistant** (Ollama tool-calling) that can *control* the radio and *reason* about
   the spectrum, with replies rendered as Markdown:
   - `get_status` / `get_spectrum` / `get_signal_metrics` — inspect state and signal quality,
@@ -221,7 +225,8 @@ AI tool dispatch. The frontend tests cover the pure helpers in `frontend/lib.js`
 | `SDR_PORT`        | `1234`            | rtl_tcp port |
 | `SAMPLE_RATE`     | `2400000`         | SDR sample rate |
 | `FFT_SIZE`        | `8192`            | FFT bins per frame |
-| `AVERAGES`        | `2`               | frames averaged per update |
+| `AVERAGES`        | `1`               | frames averaged per update (1 = no averaging) |
+| `SPECTRUM_BINS`   | `2048`            | spectrum bins sent per frame (max-pooled from `FFT_SIZE`) |
 | `MIN_SPAN_HZ`     | `250000`          | smallest zoom span in the UI (Hz) |
 | `DEFAULT_FREQ`    | `100000000`       | startup frequency (Hz) |
 | `DEFAULT_GAIN`    | `auto`            | startup gain |
@@ -234,7 +239,7 @@ AI tool dispatch. The frontend tests cover the pure helpers in `frontend/lib.js`
 | `OLLAMA_MODEL`    | `gemma4:latest`   | model name (must support tools) |
 | `MAX_HISTORY_MESSAGES` | `40`          | max chat-history messages sent to the model |
 | `MAX_SIGNALS`     | `10`              | max signals returned per tool call |
-| `METRICS_INTERVAL` | `4`              | recompute signal metrics every N frames |
+| `METRICS_INTERVAL` | `30`             | recompute signal metrics every N frames |
 
 ## Running rtl_tcp
 
