@@ -3,6 +3,8 @@ import asyncio
 import json
 import logging
 import queue
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import requests
@@ -18,11 +20,43 @@ from radio import Radio
 
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="Wideband-SDR")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    tasks = [
+        asyncio.create_task(_broadcast_loop()),
+        asyncio.create_task(_audio_broadcast_loop()),
+    ]
+    if config.AUTO_CONNECT:
+        try:
+            radio.connect()
+        except Exception as e:  # noqa: BLE001
+            log.warning("auto-connect failed (will retry on demand): %s", e)
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        radio.disconnect()
+
+
+app = FastAPI(title="Wideband-SDR", lifespan=lifespan)
 radio = Radio()
 
 clients: set[WebSocket] = set()
 audio_clients: set[WebSocket] = set()
+
+# Guards mutation of config.OLLAMA_URL / config.OLLAMA_MODEL from concurrent
+# /api/ollama/config requests. Reads of those strings are plain atomic reference
+# swaps, so they don't need the lock.
+_ollama_lock = threading.Lock()
 
 
 class ConnectReq(BaseModel):
@@ -57,34 +91,27 @@ class OllamaConfigReq(BaseModel):
     model: str | None = None
 
 
-@app.on_event("startup")
-async def _startup():
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    asyncio.create_task(_broadcast_loop())
-    asyncio.create_task(_audio_broadcast_loop())
-    if config.AUTO_CONNECT:
-        try:
-            radio.connect()
-        except Exception as e:  # noqa: BLE001
-            log.warning("auto-connect failed (will retry on demand): %s", e)
-
-
 async def _broadcast_loop():
     last = -1
+    cached_payload = None
     while True:
         if radio.latest_spectrum is not None and radio.seq != last:
             last = radio.seq
-            payload = json.dumps(radio.latest_spectrum)
+            # Serialize once, send to all clients. Caching avoids re-serializing
+            # the same dict if multiple broadcast iterations see the same seq.
+            cached_payload = json.dumps(radio.latest_spectrum)
             for ws in list(clients):
                 try:
-                    await ws.send_text(payload)
+                    await ws.send_text(cached_payload)
                 except Exception:  # noqa: BLE001
                     clients.discard(ws)
         await asyncio.sleep(config.BROADCAST_INTERVAL)
 
 
 async def _audio_broadcast_loop():
+    # Pre-allocate: convert numpy → bytes is cheap but doing it per-client
+    # wastes CPU when multiple audio clients are connected. Convert once,
+    # send the same bytes to all clients.
     while True:
         if audio_clients:
             while True:
@@ -93,12 +120,17 @@ async def _audio_broadcast_loop():
                 except queue.Empty:
                     break
                 data = audio.astype("<f4").tobytes()
+                dead = []
                 for ws in list(audio_clients):
                     try:
                         await ws.send_bytes(data)
                     except Exception:  # noqa: BLE001
-                        audio_clients.discard(ws)
-        await asyncio.sleep(0.02)
+                        dead.append(ws)
+                for ws in dead:
+                    audio_clients.discard(ws)
+        # Shorter sleep when there are audio clients to reduce latency;
+        # the queue drain is non-blocking so we just poll frequently.
+        await asyncio.sleep(0.005 if audio_clients else 0.02)
 
 
 # ---- REST API ----
@@ -129,8 +161,13 @@ def api_tune(req: TuneReq):
 
 @app.post("/api/gain")
 def api_gain(req: GainReq):
-    gain = "auto" if req.gain.strip().lower() == "auto" else float(req.gain)
-    return radio.set_gain(gain)
+    g = req.gain.strip()
+    if g.lower() == "auto":
+        return radio.set_gain("auto")
+    try:
+        return radio.set_gain(float(g))
+    except ValueError:
+        return {"error": f"invalid gain: {req.gain!r}"}
 
 
 @app.post("/api/sample_rate")
@@ -141,6 +178,12 @@ def api_sample_rate(req: SampleRateReq):
 @app.post("/api/freq_correction")
 def api_freq_correction(req: FreqCorrectionReq):
     return radio.set_freq_correction(req.ppm)
+
+
+@app.post("/api/scan/cancel")
+def api_scan_cancel():
+    radio.cancel_scan()
+    return {"ok": True}
 
 
 @app.post("/api/chat")
@@ -174,10 +217,11 @@ def api_ollama_status():
 
 @app.post("/api/ollama/config")
 def api_ollama_config(req: OllamaConfigReq):
-    if req.url:
-        config.OLLAMA_URL = req.url.strip().rstrip("/")
-    if req.model:
-        config.OLLAMA_MODEL = req.model.strip()
+    with _ollama_lock:
+        if req.url:
+            config.OLLAMA_URL = req.url.strip().rstrip("/")
+        if req.model:
+            config.OLLAMA_MODEL = req.model.strip()
     return _ollama_status()
 
 
@@ -226,6 +270,7 @@ async def ws_endpoint(ws: WebSocket):
                     radio.set_audio_nr(float(data["nr"]))
                 if data.get("squelch") is not None:
                     radio.set_audio_squelch(float(data["squelch"]))
+                radio.commit_audio_config()
     except WebSocketDisconnect:
         pass
     finally:
@@ -250,6 +295,7 @@ async def ws_audio(ws: WebSocket):
             t = data.get("type")
             if t == "mode":
                 radio.set_audio_mode(data.get("mode", config.DEFAULT_DEMOD))
+                radio.commit_audio_config()
             elif t == "config":
                 radio.set_audio_mode(data.get("mode", config.DEFAULT_DEMOD))
                 if data.get("bandwidth"):
@@ -264,9 +310,11 @@ async def ws_audio(ws: WebSocket):
                     radio.set_audio_nr(float(data["nr"]))
                 if data.get("squelch") is not None:
                     radio.set_audio_squelch(float(data["squelch"]))
+                radio.commit_audio_config()
             elif t == "bandwidth":
                 if data.get("bandwidth"):
                     radio.set_audio_bandwidth(int(data["bandwidth"]))
+                    radio.commit_audio_config()
     except WebSocketDisconnect:
         pass
     finally:

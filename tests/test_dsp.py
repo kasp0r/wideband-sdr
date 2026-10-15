@@ -18,7 +18,7 @@ def test_to_complex_uint8_interleave():
 def test_to_complex_passthrough_complex():
     z = np.array([1 + 2j, 3 - 4j])
     out = dsp.to_complex(z)
-    assert out.dtype == np.complex128
+    assert out.dtype == np.complex64
     assert out[0] == 1 + 2j
 
 
@@ -34,6 +34,21 @@ def test_compute_averaged_spectrum_shape_and_freqs():
     assert freqs[-1] == pytest.approx(center + fs / 2 - fs / fft_size)
     # power is normalized so the peak is 0 dB
     assert power.max() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_max_pool_preserves_peak():
+    power = np.full(8192, -50.0)
+    power[4000] = 0.0  # narrow peak
+    out = dsp.max_pool(power, 2048)
+    assert out.shape == (2048,)
+    assert out[1000] == pytest.approx(0.0, abs=1e-6)  # bin 4000 // 4 == 1000
+    assert out[0] == pytest.approx(-50.0, abs=1e-6)   # noise floor preserved
+
+
+def test_max_pool_passthrough_when_n_bins_large():
+    power = np.array([1.0, 2.0, 3.0])
+    out = dsp.max_pool(power, 10)
+    assert np.array_equal(out, power)
 
 
 def test_find_peaks_detects_synthetic_signal():

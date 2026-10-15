@@ -14,6 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reset); `MIN_SPAN_HZ` sets the smallest zoom level.
 - Theme selector (Black, Dark, Midnight, Amber, Light, Solarized, Nord, Terminal).
 - Spectrum smoothing slider (temporal averaging of the trace).
+- Cancellable, wall-clock-capped band scans (`POST /api/scan/cancel`; scans honour
+  cancellation and a `SCAN_MAX_WALL_TIME` deadline).
+- Gain / sample-rate input validation with configurable hardware limits
+  (`MIN_SAMPLE_RATE`, `MAX_SAMPLE_RATE`, `MIN_GAIN_DB`, `MAX_GAIN_DB`).
+- Spectrum transport downsampling (`SPECTRUM_BINS`) — the FFT output is max-pooled
+  before streaming, cutting the WebSocket payload ~4× while preserving peaks for
+  click-to-tune.
+
+### Changed
+
+- Replaced the deprecated `@app.on_event("startup")` hook with a `lifespan` handler
+  that also shuts the radio and background loops down gracefully.
+- Hardened the audio-demodulator hand-off in the reader thread against a concurrent
+  settings-change race; documented the threading contract in `radio.py`.
+- Tightened tuning/audio responsiveness: `audio_chunk` 0.1 → 0.05 s and
+  `BROADCAST_INTERVAL` 0.03 → 0.02 s.
 
 ### Changed
 

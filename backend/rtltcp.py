@@ -14,6 +14,7 @@ Protocol summary (see librtlsdr's rtl_tcp.c):
 """
 import socket
 import struct
+import collections
 
 CMD_SET_FREQ = 0x01
 CMD_SET_SAMPLE_RATE = 0x02
@@ -44,18 +45,46 @@ class RtlTcpClient:
         self.port = port
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(timeout)
+        # Large receive buffer: rtl_tcp streams at ~4.6 MB/s; a bigger kernel
+        # buffer means fewer recv() syscalls (each syscall burns GIL + kernel
+        # time). 1 MB is ~200 ms of audio at 2.4 MHz.
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        # Disable Nagle: we only send tiny 5-byte commands, never bulk data,
+        # so Nagle's coalescing delay would just add latency to tune/gain cmds.
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.closed = False
+        # Ring buffer for efficient bulk reads: avoids repeated b"" + chunk
+        # concatenation (O(n²) for many small arrivals) and reduces syscalls.
+        self._buf = collections.deque()
+        self._buf_len = 0
         self.tuner_type, self.gain_count = self._read_banner()
 
     # ---- low-level IO ----
     def _recv_exact(self, n):
-        buf = b""
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
+        """Read exactly n bytes, using an internal ring buffer to absorb
+        TCP segment fragmentation efficiently."""
+        while self._buf_len < n:
+            chunk = self.sock.recv(65536)  # large read to minimize syscalls
             if not chunk:
                 raise RtlTcpError("rtl_tcp closed the connection")
-            buf += chunk
-        return buf
+            self._buf.append(chunk)
+            self._buf_len += len(chunk)
+        # Assemble the result from the ring buffer.
+        parts = []
+        remaining = n
+        while remaining > 0:
+            head = self._buf[0]
+            if len(head) <= remaining:
+                parts.append(head)
+                self._buf.popleft()
+                self._buf_len -= len(head)
+                remaining -= len(head)
+            else:
+                parts.append(head[:remaining])
+                self._buf[0] = head[remaining:]
+                self._buf_len -= remaining
+                remaining = 0
+        return b"".join(parts) if len(parts) > 1 else parts[0]
 
     def _read_banner(self):
         data = self._recv_exact(12)
@@ -88,6 +117,8 @@ class RtlTcpClient:
 
     # ---- sample stream ----
     def read_bytes(self, num_bytes):
+        """Read exactly num_bytes of IQ sample data.
+        Uses the internal ring buffer to minimize recv() syscalls."""
         return self._recv_exact(num_bytes)
 
     def close(self):

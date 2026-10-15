@@ -4,19 +4,45 @@ import numpy as np
 
 def to_complex(samples):
     """Convert interleaved uint8/int8 I/Q bytes (or an already-complex array)
-    into a complex128 array.
+    into a complex64 array.
 
     rtl_tcp streams raw interleaved uint8 samples centered around 127.5;
-    this turns them into complex float samples around 0.
+    this turns them into complex float32 samples around 0. Float32 precision
+    is ample for power spectra and halves the FFT's memory traffic.
     """
     arr = np.asarray(samples)
     if arr.dtype == np.uint8:
         arr = arr.astype(np.float32) - 127.5
-        return (arr[0::2] + 1j * arr[1::2]).astype(np.complex128)
+        return arr[0::2] + 1j * arr[1::2]
     if arr.dtype == np.int8:
         arr = arr.astype(np.float32)
-        return (arr[0::2] + 1j * arr[1::2]).astype(np.complex128)
-    return arr.astype(np.complex128)
+        return arr[0::2] + 1j * arr[1::2]
+    if arr.dtype == np.complex64:
+        return arr  # already the right dtype: no copy
+    return arr.astype(np.complex64)
+
+
+_HANN_CACHE = {}  # fft_size -> float32 Hann window
+_FREQ_CACHE = {}  # (center_freq, sample_rate, fft_size) -> frequency axis
+
+
+def _hann_window(fft_size):
+    w = _HANN_CACHE.get(fft_size)
+    if w is None:
+        w = np.hanning(fft_size).astype(np.float32)
+        _HANN_CACHE[fft_size] = w
+    return w
+
+
+def _freq_axis(center_freq, sample_rate, fft_size):
+    # The frequency axis only changes when tuning or the sample rate changes,
+    # so cache it rather than recomputing (and fftshift-ing) it every frame.
+    key = (int(center_freq), int(sample_rate), int(fft_size))
+    freqs = _FREQ_CACHE.get(key)
+    if freqs is None:
+        freqs = center_freq + np.fft.fftshift(np.fft.fftfreq(fft_size, 1.0 / sample_rate))
+        _FREQ_CACHE[key] = freqs
+    return freqs
 
 
 def compute_averaged_spectrum(iq_block, sample_rate, fft_size, center_freq, averages):
@@ -26,13 +52,31 @@ def compute_averaged_spectrum(iq_block, sample_rate, fft_size, center_freq, aver
     if iq.size < n:
         raise ValueError("not enough samples")
     iq = iq.reshape(averages, fft_size)
-    window = np.hanning(fft_size)
-    X = np.fft.fftshift(np.fft.fft(iq * window, axis=1), axes=1)
-    power = np.mean(np.abs(X) ** 2, axis=0)
+    # float32 window keeps the FFT at single precision (iq is complex64).
+    X = np.fft.fftshift(np.fft.fft(iq * _hann_window(fft_size), axis=1), axes=1)
+    # Magnitude-squared from the real/imag parts directly (no sqrt in np.abs).
+    power = np.mean(X.real ** 2 + X.imag ** 2, axis=0)
     power_db = 10.0 * np.log10(power + 1e-12)
     power_db -= power_db.max()  # 0 dB = strongest bin
-    freqs = center_freq + np.fft.fftshift(np.fft.fftfreq(fft_size, 1.0 / sample_rate))
+    freqs = _freq_axis(center_freq, sample_rate, fft_size)
     return freqs, power_db
+
+
+def max_pool(power, n_bins):
+    """Max-pool `power` down to `n_bins` bins, preserving peaks for transport.
+
+    The FFT yields `fft_size` bins, but the browser renders the trace into a
+    canvas far narrower than that. Max-pooling (vs. averaging) keeps narrow peaks
+    at full amplitude so click-to-tune still snaps to them. Trailing bins are
+    dropped when `n_bins` doesn't divide the length evenly.
+    """
+    power = np.asarray(power, dtype=np.float64)
+    n = power.size
+    if n_bins >= n:
+        return power
+    factor = n // n_bins
+    trimmed = power[:factor * n_bins]
+    return trimmed.reshape(n_bins, factor).max(axis=1)
 
 
 def estimate_bandwidth(power_db, freqs, peak_idx, level_db):
@@ -88,6 +132,19 @@ def guess_modulation(bandwidth_hz):
     if bandwidth_hz < 250_000:
         return "FM (NBFM/WFM) or digital"
     return "wideband: broadcast FM, DAB, DVB-T, LTE"
+
+
+def short_modulation(bandwidth_hz):
+    """Short (one-line) modulation label for the compact UI panel."""
+    if bandwidth_hz < 4_000:
+        return "CW / SSB / narrow"
+    if bandwidth_hz < 15_000:
+        return "SSB / AM / narrow"
+    if bandwidth_hz < 80_000:
+        return "AM voice"
+    if bandwidth_hz < 250_000:
+        return "FM / NBFM"
+    return "Wideband"
 
 
 # Frequency -> likely service. Values in Hz. Covers the RTL-SDR tuning range.
@@ -179,6 +236,7 @@ def signal_metrics(freqs, power_db, center_freq):
         "snr_db": float(target["power_db"] - noise_floor),
         "bandwidth_hz": bw,
         "modulation_hint": guess_modulation(bw),
+        "modulation": short_modulation(bw),
         "band": band_context(target["freq_hz"]),
         "num_signals_in_view": len(peaks),
         "adjacent_interference_db": _adjacent_interference(
